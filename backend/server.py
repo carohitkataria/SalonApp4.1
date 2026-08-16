@@ -246,6 +246,12 @@ class ServiceCreate(BaseModel):
     linked_service_ids: Optional[List[str]] = None
     discount_percentage: Optional[float] = None
     services_subtotal: Optional[float] = None  # snapshot of the sum-of-services at save time
+    # Variant pricing — tier × length matrix (redesign 2026)
+    axes: Optional[List[str]] = None  # subset of ["tier", "length"]
+    price_matrix: Optional[Dict[str, Any]] = None  # {tier: {length: price}} / {tier: price} / {length: price}
+    # Package composition v2 — services with per-sitting schedule offset + price
+    package_items: Optional[List[Dict[str, Any]]] = None  # [{service_id, day_offset, price}]
+    package_price: Optional[float] = None
 
 class ServiceUpdate(BaseModel):
     service_name: Optional[str] = None
@@ -275,6 +281,10 @@ class ServiceUpdate(BaseModel):
     linked_service_ids: Optional[List[str]] = None
     discount_percentage: Optional[float] = None
     services_subtotal: Optional[float] = None
+    axes: Optional[List[str]] = None
+    price_matrix: Optional[Dict[str, Any]] = None
+    package_items: Optional[List[Dict[str, Any]]] = None
+    package_price: Optional[float] = None
 
 class Service(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -307,6 +317,10 @@ class Service(BaseModel):
     linked_service_ids: Optional[List[str]] = None
     discount_percentage: Optional[float] = None
     services_subtotal: Optional[float] = None
+    axes: Optional[List[str]] = None
+    price_matrix: Optional[Dict[str, Any]] = None
+    package_items: Optional[List[Dict[str, Any]]] = None
+    package_price: Optional[float] = None
 
 # Package Models
 class PackageService(BaseModel):
@@ -5459,6 +5473,85 @@ async def delete_category(salon_id: str, cat_id: str, current_salon=Depends(get_
     return {"message": "Category removed"}
 
 
+# ============================================================================
+# Classification (Tier / Hair-length) + Ops-settings (redesign 2026)
+# ============================================================================
+DEFAULT_TIERS = ["Basic", "Standard", "Premium", "Ultra"]
+DEFAULT_LENGTHS = ["Short", "Medium", "Long", "XL"]
+DEFAULT_OPS_SETTINGS = {
+    "multi_barber_enabled": False,       # per-service multi-barber allocation on appointment page
+    "per_service_discount_enabled": False,  # per-service discount % field
+    "back_dated_invoice_enabled": False, # allow past-dated invoices
+    "stylist_required": True,            # stylist mandatory for direct invoice
+    "show_online_prices": True,          # show prices to online customers
+}
+
+
+@api_router.get("/salons/{salon_id}/classification")
+async def get_salon_classification(salon_id: str):
+    """Tier + hair-length + category classification sets used by the price
+    matrix and the service list. Single source of truth for the service editor
+    and the appointment page."""
+    doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0})
+    if not doc:
+        doc = {"salon_id": salon_id, "tiers": DEFAULT_TIERS[:], "lengths": DEFAULT_LENGTHS[:],
+               "categories": [], "package_categories": []}
+        await db.salon_classification.insert_one(dict(doc))
+    return {
+        "tiers": doc.get("tiers") or DEFAULT_TIERS[:],
+        "lengths": doc.get("lengths") or DEFAULT_LENGTHS[:],
+        "categories": doc.get("categories") or [],          # [{name, thumbnail_url}]
+        "package_categories": doc.get("package_categories") or [],  # [str]
+    }
+
+
+@api_router.put("/salons/{salon_id}/classification")
+async def update_salon_classification(salon_id: str, body: dict, current_salon=Depends(get_current_salon)):
+    updates = {}
+    if isinstance(body.get("tiers"), list):
+        updates["tiers"] = [str(t).strip() for t in body["tiers"] if str(t).strip()]
+    if isinstance(body.get("lengths"), list):
+        updates["lengths"] = [str(l).strip() for l in body["lengths"] if str(l).strip()]
+    if isinstance(body.get("categories"), list):
+        cats = []
+        for c in body["categories"]:
+            if isinstance(c, dict) and (c.get("name") or "").strip():
+                cats.append({"name": c["name"].strip(), "thumbnail_url": c.get("thumbnail_url") or ""})
+            elif isinstance(c, str) and c.strip():
+                cats.append({"name": c.strip(), "thumbnail_url": ""})
+        updates["categories"] = cats
+    if isinstance(body.get("package_categories"), list):
+        updates["package_categories"] = [str(p).strip() for p in body["package_categories"] if str(p).strip()]
+    if updates:
+        await db.salon_classification.update_one(
+            {"salon_id": salon_id}, {"$set": {**updates, "salon_id": salon_id}}, upsert=True)
+    doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0}) or {}
+    return {
+        "tiers": doc.get("tiers") or DEFAULT_TIERS[:],
+        "lengths": doc.get("lengths") or DEFAULT_LENGTHS[:],
+        "categories": doc.get("categories") or [],
+        "package_categories": doc.get("package_categories") or [],
+    }
+
+
+@api_router.get("/salons/{salon_id}/ops-settings")
+async def get_salon_ops_settings(salon_id: str):
+    """Appointment/service page feature flags (multi-barber, per-service discount, etc.)."""
+    doc = await db.salon_ops_settings.find_one({"salon_id": salon_id}, {"_id": 0}) or {}
+    return {**DEFAULT_OPS_SETTINGS, **{k: doc.get(k) for k in DEFAULT_OPS_SETTINGS if doc.get(k) is not None}}
+
+
+@api_router.put("/salons/{salon_id}/ops-settings")
+async def update_salon_ops_settings(salon_id: str, body: dict, current_salon=Depends(get_current_salon)):
+    updates = {k: bool(body[k]) for k in DEFAULT_OPS_SETTINGS if k in body}
+    if updates:
+        await db.salon_ops_settings.update_one(
+            {"salon_id": salon_id}, {"$set": {**updates, "salon_id": salon_id}}, upsert=True)
+    doc = await db.salon_ops_settings.find_one({"salon_id": salon_id}, {"_id": 0}) or {}
+    return {**DEFAULT_OPS_SETTINGS, **{k: doc.get(k) for k in DEFAULT_OPS_SETTINGS if doc.get(k) is not None}}
+
+
+
 @api_router.post("/services", response_model=Service)
 async def create_service(service: ServiceCreate, current_salon=Depends(get_current_salon)):
     service_dict = service.model_dump()
@@ -9704,12 +9797,27 @@ async def create_salon_booking(salon_id: str, body: dict, current_user=Depends(g
             continue
         line_price = await _resolve_assignment_price(line_barber, svc_id)
         lb = await db.barbers.find_one({"id": line_barber, "salon_id": salon_id}, {"_id": 0, "name": 1})
-        service_assignments.append({
+        _asg = {
             "service_id": svc_id,
             "barber_id": line_barber,
             "barber_name_snapshot": (lb or {}).get("name", ""),
             "service_price": round(float(line_price or 0), 2),
-        })
+        }
+        # Per-service multi-barber allocation (each {barber_id, pct}) + per-service discount %
+        if isinstance(sp, dict):
+            allocs = sp.get("barber_allocations")
+            if isinstance(allocs, list) and allocs:
+                _asg["barber_allocations"] = [
+                    {"barber_id": a.get("barber_id"), "pct": round(float(a.get("pct") or 0), 2)}
+                    for a in allocs if isinstance(a, dict) and a.get("barber_id")
+                ]
+            if sp.get("discount_percent") is not None:
+                _asg["discount_percent"] = round(float(sp.get("discount_percent") or 0), 2)
+            if sp.get("tier"):
+                _asg["tier"] = sp.get("tier")
+            if sp.get("length"):
+                _asg["length"] = sp.get("length")
+        service_assignments.append(_asg)
         _distinct_line_barbers.add(line_barber)
     # Only keep assignments when they add information (a real split across ≥2 barbers).
     if len(_distinct_line_barbers) <= 1:
@@ -14916,9 +15024,11 @@ async def create_direct_invoice(
     # -- Per-service barber map (Module 7 split): service_id -> barber_id --
     services_payload = body.get("services_payload") or []
     line_barber_map = {}
+    line_meta_map = {}
     for sp in services_payload:
         if isinstance(sp, dict) and sp.get("service_id"):
             line_barber_map[sp.get("service_id")] = sp.get("barber_id") or barber_id
+            line_meta_map[sp.get("service_id")] = sp
 
     # -- Compute base subtotal (services) --
     subtotal = 0.0
@@ -14959,19 +15069,43 @@ async def create_direct_invoice(
         if (price is None or price == 0) and fallback_price:
             price = float(fallback_price)
         price = float(price or 0)
+        # Per-service discount % (feature-flag gated on the frontend)
+        _meta = line_meta_map.get(svc_id) or {}
+        _disc_pct = 0.0
+        try:
+            _disc_pct = float(_meta.get("discount_percent") or 0)
+        except (TypeError, ValueError):
+            _disc_pct = 0.0
+        if _disc_pct > 0:
+            price = round(price * (1 - _disc_pct / 100.0), 2)
         subtotal += price
         service_details.append({"service_id": svc_id, "price": price})
         if line_barber and line_barber != "any":
             lb = await db.barbers.find_one({"id": line_barber}, {"_id": 0, "name": 1})
-            service_assignments.append({
+            _asg = {
                 "service_id": svc_id,
                 "barber_id": line_barber,
                 "barber_name_snapshot": (lb or {}).get("name", ""),
                 "service_price": round(price, 2),
-            })
+            }
+            allocs = _meta.get("barber_allocations")
+            if isinstance(allocs, list) and allocs:
+                _asg["barber_allocations"] = [
+                    {"barber_id": a.get("barber_id"), "pct": round(float(a.get("pct") or 0), 2)}
+                    for a in allocs if isinstance(a, dict) and a.get("barber_id")
+                ]
+            if _disc_pct > 0:
+                _asg["discount_percent"] = _disc_pct
+            if _meta.get("tier"):
+                _asg["tier"] = _meta.get("tier")
+            if _meta.get("length"):
+                _asg["length"] = _meta.get("length")
+            service_assignments.append(_asg)
             _distinct_line_barbers.add(line_barber)
-    # Only keep assignments when they represent a real split across ≥2 barbers.
-    if len(_distinct_line_barbers) <= 1:
+    # Keep assignments for a real barber-split (≥2) OR when any line carries
+    # a multi-barber allocation / per-service discount (extra info worth storing).
+    _has_extra = any(("barber_allocations" in a or "discount_percent" in a) for a in service_assignments)
+    if len(_distinct_line_barbers) <= 1 and not _has_extra:
         service_assignments = []
 
     # -- Product subtotal (also decrements inventory) --
@@ -18259,6 +18393,60 @@ async def check_salon_holiday(salon_id: str, date: str):
         "reason": None,
         "type": None
     }
+
+
+async def _is_salon_closed_on(salon_id: str, date_iso: str, salon_doc: Optional[dict] = None) -> bool:
+    """True if the salon is on an explicit holiday OR weekly-off for `date_iso`."""
+    try:
+        h = await db.salon_holidays.find_one({"salon_id": salon_id, "date": date_iso}, {"_id": 0})
+        if h:
+            return True
+        salon = salon_doc or await db.salons.find_one({"id": salon_id}, {"_id": 0, "operational_hours": 1})
+        if salon and salon.get("operational_hours"):
+            weekday = datetime.fromisoformat(date_iso).strftime("%A").lower()
+            if (salon["operational_hours"].get(weekday, {}) or {}).get("is_holiday"):
+                return True
+    except (ValueError, AttributeError, KeyError):
+        return False
+    return False
+
+
+async def resolve_non_holiday_date(salon_id: str, date_iso: str, max_shift: int = 14) -> str:
+    """Return `date_iso`, or the next open day if the salon is closed then."""
+    salon = await db.salons.find_one({"id": salon_id}, {"_id": 0, "operational_hours": 1})
+    try:
+        d = datetime.fromisoformat(date_iso)
+    except (ValueError, TypeError):
+        return date_iso
+    for _ in range(max_shift + 1):
+        iso = d.strftime("%Y-%m-%d")
+        if not await _is_salon_closed_on(salon_id, iso, salon):
+            return iso
+        d = d + timedelta(days=1)
+    return date_iso
+
+
+@api_router.post("/salons/{salon_id}/resolve-schedule-dates")
+async def resolve_schedule_dates(salon_id: str, body: dict):
+    """Given a start date + a list of day-offsets (package sittings), return the
+    holiday-shifted booking date for each sitting (skips explicit holidays and
+    weekly-offs, moving to the next open day)."""
+    start = body.get("start_date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    offsets = body.get("offsets") or []
+    try:
+        base = datetime.fromisoformat(start)
+    except (ValueError, TypeError):
+        base = datetime.now(timezone.utc)
+    out = []
+    for off in offsets:
+        try:
+            raw = (base + timedelta(days=int(off or 0))).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            raw = base.strftime("%Y-%m-%d")
+        resolved = await resolve_non_holiday_date(salon_id, raw)
+        out.append({"day_offset": off, "raw_date": raw, "date": resolved, "shifted": resolved != raw})
+    return {"start_date": start, "sittings": out}
+
 
 
 @api_router.post("/salons/{salon_id}/staff-holidays")
