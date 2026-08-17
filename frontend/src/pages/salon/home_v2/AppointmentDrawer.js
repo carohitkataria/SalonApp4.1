@@ -675,14 +675,38 @@ export default function AppointmentDrawer({
           .newapt .svc-disc{margin-top:7px;display:flex;align-items:center;gap:8px}
           .newapt .svc-disc label{font-size:9.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#7C8092}
           .newapt .svc-disc input{width:70px;border:1.5px solid #CBD0DE;border-radius:7px;padding:5px 7px;font-size:12px;font-family:inherit;text-align:right}
+          .newapt .drawer__h .apt-modeseg{display:inline-flex;border:1.5px solid #CBD0DE;border-radius:11px;overflow:hidden;background:#fff}
+          .newapt .apt-modeseg .ms{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border:0;border-right:1.5px solid #ECECF3;background:#fff;color:#7C8092;font-weight:700;font-size:12.5px}
+          .newapt .apt-modeseg .ms:last-child{border-right:0}
+          .newapt .apt-modeseg .ms svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2}
+          .newapt .apt-modeseg .ms span{display:none}
+          .newapt .apt-modeseg .ms.on{background:#6C4FE0;color:#fff}
+          .newapt .apt-modeseg .ms.on span{display:inline}
+          .newapt .apt-fav-chip{padding:5px 10px !important}
+          .newapt .apt-fav-chip .apt-fav-star{font-size:18px;line-height:1;color:#C9992B}
+          .newapt .apt-fav-chip.on{background:#C9992B !important;border-color:#C9992B !important}
+          .newapt .apt-fav-chip.on .apt-fav-star{color:#fff}
+          .newapt .apt-catbody.has-rail{display:grid;grid-template-columns:auto 1fr;gap:9px;align-items:start}
+          .newapt .apt-catbody .catalog{min-width:0}
+          .newapt .apt-vrail{display:flex;flex-direction:column;gap:5px;padding:6px 5px;border:1.5px solid #ECECF3;border-radius:11px;background:#FBFBFE;align-self:start;position:sticky;top:0}
+          .newapt .apt-vrail .vr-grp{display:flex;flex-direction:column;gap:4px}
+          .newapt .apt-vrail .vr-lbl{font-size:8px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#9A9EAE;text-align:center}
+          .newapt .apt-vrail .vr-sep{height:1.5px;background:#ECECF3;margin:3px 2px}
+          .newapt .apt-vrail button{width:44px;padding:6px 2px;border:1.5px solid #CBD0DE;background:#fff;border-radius:9px;font-weight:800;font-size:10px;color:#3C3F4E;cursor:pointer}
+          .newapt .apt-vrail button.on{background:#6C4FE0;border-color:#6C4FE0;color:#fff}
         `}</style>
         {/* header */}
         <div className="drawer__h">
-          <div className="tt">
-            <div className="ic">
-              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-            </div>
-            <div><h3>New Appointment</h3></div>
+          <div className="apt-modeseg" data-testid="apt-modeseg">
+            <button className={`ms ${mode === 'direct' ? 'on' : ''}`} onClick={() => setMode('direct')} data-testid="apt-mode-direct" title="Direct invoice">
+              <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg><span>Direct invoice</span>
+            </button>
+            <button className={`ms ${mode === 'queue' ? 'on' : ''}`} onClick={() => setMode('queue')} data-testid="apt-mode-queue" title="Walk-in">
+              <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><span>Walk-in</span>
+            </button>
+            <button className={`ms ${mode === 'schedule' ? 'on' : ''}`} onClick={() => setMode('schedule')} data-testid="apt-mode-schedule" title="Schedule">
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg><span>Schedule</span>
+            </button>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
             <button className="apt-gear" title="Appointment settings" data-testid="apt-settings-btn"
@@ -721,23 +745,9 @@ export default function AppointmentDrawer({
         <div className="book-split">
           {/* ============================= LEFT ============================= */}
           <div className="book-left">
-            {/* Modes */}
-            <div className="block">
-              <div className="mode-pick">
-                <button className={`mode ${mode === 'queue' ? 'on' : ''}`} onClick={() => setMode('queue')}>
-                  <div className="mi"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg></div>
-                  <div><b>Walk-in</b><span>Add to queue now</span></div>
-                </button>
-                <button className={`mode ${mode === 'direct' ? 'on' : ''}`} onClick={() => setMode('direct')}>
-                  <div className="mi"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></div>
-                  <div><b>Direct invoice</b><span>Walk-out billing</span></div>
-                </button>
-                <button className={`mode ${mode === 'schedule' ? 'on' : ''}`} onClick={() => setMode('schedule')}>
-                  <div className="mi"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg></div>
-                  <div><b>Schedule</b><span>Future date &amp; slot</span></div>
-                </button>
-              </div>
-              {mode === 'schedule' && (
+          {/* Modes moved to header. Schedule date/slot shown only when scheduling. */}
+            {mode === 'schedule' && (
+              <div className="block">
                 <div className="sched show">
                   <div className="sf">
                     <label>Date</label>
@@ -755,8 +765,8 @@ export default function AppointmentDrawer({
                     {errors.date && <span className="msg show">{errors.date}</span>}
                   </div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             {/* Guest search relocated to the right "Guest details" card (redesign 2026). */}
 
@@ -786,10 +796,11 @@ export default function AppointmentDrawer({
                   const label = c === 'fav' ? '★ Favourites' : c === 'all' ? 'All' : c === 'mem' ? 'Memberships' : c;
                   return (
                     <button key={c} onClick={() => { setCategory(c); setQ(''); }}
-                            className={category === c && !q ? 'on' : ''}
+                            className={`${category === c && !q ? 'on' : ''} ${c === 'fav' ? 'apt-fav-chip' : ''}`}
                             data-testid={`apt-cat-${c}`}
+                            title={c === 'fav' ? 'Favourites' : undefined}
                             style={{ ['--cc']: col.cc, ['--ccbg']: col.bg }}>
-                      <span className="bd" />{label}
+                      {c === 'fav' ? <span className="apt-fav-star">★</span> : <><span className="bd" />{label}</>}
                     </button>
                   );
                 })}
@@ -798,27 +809,29 @@ export default function AppointmentDrawer({
                 const list = filteredCatalog.services || [];
                 const anyTier = list.some((s) => (s.axes || []).includes('tier'));
                 const anyLen = list.some((s) => (s.axes || []).includes('length'));
-                if (!anyTier && !anyLen) return null;
-                return (
-                  <div className="apt-variant" data-testid="apt-variant-rail">
+                const rail = (anyTier || anyLen) ? (
+                  <div className="apt-vrail" data-testid="apt-variant-rail">
                     {anyTier && (
-                      <div className="av-row"><span className="av-lbl">Tier</span>
+                      <div className="vr-grp"><span className="vr-lbl">Tier</span>
                         {classification.tiers.map((t, i) => (
-                          <button key={t} className={activeTier === i ? 'on' : ''} onClick={() => setActiveTier(i)}>{t}</button>
+                          <button key={t} className={activeTier === i ? 'on' : ''} onClick={() => setActiveTier(i)} title={`Tier: ${t}`}>{t.slice(0, 4)}</button>
                         ))}
                       </div>
                     )}
+                    {anyTier && anyLen && <div className="vr-sep" />}
                     {anyLen && (
-                      <div className="av-row"><span className="av-lbl">Length</span>
+                      <div className="vr-grp"><span className="vr-lbl">Len</span>
                         {classification.lengths.map((l, i) => (
-                          <button key={l} className={activeLen === i ? 'on' : ''} onClick={() => setActiveLen(i)}>{l}</button>
+                          <button key={l} className={activeLen === i ? 'on' : ''} onClick={() => setActiveLen(i)} title={`Length: ${l}`}>{l}</button>
                         ))}
                       </div>
                     )}
                   </div>
-                );
-              })()}
-              <div className="catalog">
+                ) : null;
+                return (
+                  <div className={`apt-catbody ${rail ? 'has-rail' : ''}`}>
+                    {rail}
+                    <div className="catalog">
                 {filteredCatalog.kind === 'search' && (
                   <>
                     {filteredCatalog.services.length > 0 && (
@@ -875,7 +888,10 @@ export default function AppointmentDrawer({
                     </div>
                   ) : <div className="cat-empty">No services here.</div>
                 )}
-              </div>
+                    </div>
+                  </div>
+                );
+              })()}
               {errors.svc && <span className="msg show" style={{ display: 'block', marginTop: 6 }}>{errors.svc}</span>}
             </div>
 
@@ -910,7 +926,6 @@ export default function AppointmentDrawer({
           <div className="book-mid">
             <div className="bmr__h">
               <div className="t"><span className="bd" />Barber {stylistRequired && <span className="req">*</span>}</div>
-              <div className="sub">{stylistRequired ? 'Required for invoice' : 'Pick manually'}</div>
             </div>
             <div className="bmr__list">
               {barbers.length === 0 && <div className="cat-empty">No stylists yet.</div>}

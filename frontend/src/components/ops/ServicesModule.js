@@ -35,7 +35,7 @@ function injectCss() {
   if (_cssDone || typeof document === 'undefined') return;
   _cssDone = true;
   const css = `
-.svc2{--p:#6C4FE0;--p6:#5B3FD1;--p05:#F1EEFF;--p1:#E7E2FF;--p2:#D6CBFF;--bg:#F6F6FB;--sf:#fff;--sf2:#FBFBFE;--ink:#23252F;--inks:#3C3F4E;--mut:#7C8092;--mut2:#9A9EAE;--line:#E3E3EC;--lines:#CBD0DE;--ok:#2FA96A;--bad:#E45C86;--badbg:#FCEAF1;--gold:#C9992B;--goldbg:#FBF3DF;font-family:'Inter',system-ui,sans-serif;color:var(--ink);font-size:13px;display:flex;flex-direction:column;height:100%;min-height:0}
+.svc2{--p:#6C4FE0;--p6:#5B3FD1;--p05:#F1EEFF;--p1:#E7E2FF;--p2:#D6CBFF;--bg:#F6F6FB;--sf:#fff;--sf2:#FBFBFE;--ink:#23252F;--inks:#3C3F4E;--mut:#7C8092;--mut2:#9A9EAE;--line:#E3E3EC;--lines:#CBD0DE;--ok:#2FA96A;--bad:#E45C86;--badbg:#FCEAF1;--gold:#C9992B;--goldbg:#FBF3DF;font-family:'Inter',system-ui,sans-serif;color:var(--ink);font-size:13px;display:flex;flex-direction:column;height:100%;min-height:0;box-sizing:border-box;padding:14px 4px 30px}
 .svc2 *{box-sizing:border-box}
 .svc2 button{font-family:inherit;cursor:pointer}
 .svc2 .num{font-variant-numeric:tabular-nums}
