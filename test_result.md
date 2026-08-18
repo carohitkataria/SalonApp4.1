@@ -104,6 +104,94 @@
 
 user_problem_statement: "Implement multi-user role-based access system for salon with Admin and Staff roles. Add staff management with employee fields (department, designation, emergency contact, Aadhar, DOJ, DOB, compensation, documents). Create hamburger menu navigation with role-based access control. Add 'Manage Staff Access' section, Financials and Customer Master placeholders. Add notification rules with toggles for both salon and customer sides, including WhatsApp toggles for customer. Add Reschedule/Cancel action links to WhatsApp messages with link-based cancel flow. Fix notification bell overlapping the Map view button on customer search page."
 
+#=== NEW SESSION (appointment redesign + per-service discount) — TEST ONLY per-service discount ===
+appt_redesign_backend:
+  - task: "Per-service discount logic (direct-invoice + salon-booking)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+          Per-service discount % is now applied to each service line in BOTH endpoints:
+            - POST /api/salons/{salon_id}/direct-invoice
+            - POST /api/salons/{salon_id}/salon-booking
+          The frontend sends `services_payload` = [{service_id, barber_id, barber_allocations, discount_percent, tier, length}].
+          Backend applies discount_percent to the line's list price -> stores `service_price` (net, discounted)
+          and `list_price` (pre-discount) in `service_assignments`, plus `discount_percent`.
+          The order subtotal / total_amount MUST reflect the discounted line prices.
+          Also: multi-barber split — `attribute_token_revenue_to_barbers` now splits each line's revenue
+          across `barber_allocations` by pct (normalised).
+
+          AUTH: POST /api/salon/users/login {identifier:"admin", password:"salon123"} -> access_token (Bearer).
+          salon_id = 9d2c95b0-3931-4e0c-b7e8-70aba857bd0a  (seeded demo data: services with base_price, 5 barbers).
+          Fetch services via GET /api/salons/{salon_id}/services/enabled to get real service_id + base_price.
+          Barbers via GET /api/salons/{salon_id}/barbers.
+
+          TEST SCENARIOS (per-service discount is the ONLY focus):
+          1) direct-invoice with ONE service, discount_percent=50 on that line:
+             expect token.total_amount == round(base_price*0.5) and service_assignments[0].service_price == that,
+             list_price == base_price, discount_percent == 50.
+          2) direct-invoice with TWO services, one at 0% and one at 20%:
+             expect subtotal == base1 + base2*0.8.
+          3) salon-booking (booking_type "queue" walk-in) with a per-service discount:
+             expect total_amount reflects the discounted line price (not full base).
+          Verify GET the created token (GET /api/salons/{salon_id}/tokens or history) shows discounted totals.
+        -working: true
+        -agent: "testing"
+        -comment: |
+          ✅ PER-SERVICE DISCOUNT LOGIC FULLY TESTED AND WORKING: Comprehensive testing completed successfully with ALL 3 test scenarios passing. AUTHENTICATION: Admin login working perfectly with identifier='admin', password='salon123', salon_id='9d2c95b0-3931-4e0c-b7e8-70aba857bd0a'. Retrieved 12 services and 5 barbers (Imran, Abdul, Rahul, Kabir, Anita) for testing.
+          
+          TEST RESULTS:
+          1) DIRECT-INVOICE SINGLE SERVICE 50% DISCOUNT - ✅ PASS
+             - Service: base_price=₹300.0, discount_percent=50
+             - POST /api/salons/{salon_id}/direct-invoice returned HTTP 200
+             - Response totals.grand_total: ₹150.0 (EXACT MATCH: 300 * 0.5 = 150)
+             - Token created: E5, invoice_id generated
+             - Backend logs confirm service_assignments stored correctly:
+               * service_price (net): ₹150.0
+               * list_price (base): ₹300.0
+               * discount_percent: 50.0
+          
+          2) DIRECT-INVOICE TWO SERVICES MIXED DISCOUNTS - ✅ PASS
+             - Service A: base_price=₹300.0, discount_percent=0
+             - Service B: base_price=₹8999.0, discount_percent=20
+             - Expected total: 300 + (8999 * 0.8) = 300 + 7199.2 = ₹7499.2
+             - POST /api/salons/{salon_id}/direct-invoice returned HTTP 200
+             - Response totals.grand_total: ₹7499.2 (EXACT MATCH)
+             - Token created: E6, invoice_id generated
+             - Backend logs confirm service_assignments stored correctly:
+               * Service A: service_price=₹300.0, list_price=₹300.0, discount_percent=0 (implicit)
+               * Service B: service_price=₹7199.2, list_price=₹8999.0, discount_percent=20.0
+          
+          3) SALON-BOOKING WALK-IN QUEUE 30% DISCOUNT - ✅ PASS
+             - Service: base_price=₹300.0, discount_percent=30
+             - Expected net: 300 * 0.7 = ₹210.0
+             - POST /api/salons/{salon_id}/salon-booking returned HTTP 200
+             - Response total_amount: ₹210.0 (EXACT MATCH)
+             - Token created: N5, booking_type='queue'
+             - service_assignments verified in response:
+               * service_price (net): ₹210.0
+               * list_price (base): ₹300.0
+               * discount_percent: 30.0
+          
+          CRITICAL REQUIREMENTS VERIFIED:
+          ✅ Per-service discount_percent correctly applied to each service line
+          ✅ service_price (net, discounted) calculated as list_price * (1 - discount_percent/100)
+          ✅ list_price (pre-discount base price) preserved in service_assignments
+          ✅ discount_percent stored in service_assignments when > 0
+          ✅ Order total_amount / grand_total reflects sum of discounted line prices
+          ✅ Works for BOTH direct-invoice and salon-booking endpoints
+          ✅ Mixed discounts (0%, 20%, 30%, 50%) all calculate correctly
+          ✅ Rounding to 2 decimal places working correctly (7199.2 = round(8999 * 0.8, 2))
+          
+          The per-service discount logic is production-ready and fully functional across both booking flows.
+
+
 #=== CURRENT SESSION (publish-prep + Glam Central37 fixes) — test these first ===
 current_session_backend:
   - task: "WhatsApp inbound webhook (Twilio) — sync customer replies into platform chat"
@@ -9518,3 +9606,6 @@ agent_communication:
 ## agent_communication:
 ##     -agent: "main"
 ##     -message: "Built full-stack. Backend testing DEFERRED per user instruction ('don't run backend testing for now'). Frontend smoke-tested via screenshots: Service page + editor render; Appointment drawer opens with new left filters + relocated right guest search + settings gear. Awaiting user go-ahead for automated testing."
+    -agent: "testing"
+    -message: "✅ PER-SERVICE DISCOUNT TESTING COMPLETE: All 3 test scenarios passed successfully. The per-service discount logic is working correctly in both direct-invoice and salon-booking endpoints. Discount calculations are accurate (50%, 30%, 20%, 0% all tested), service_assignments store net price + list price + discount_percent correctly, and order totals reflect discounted line prices. No issues found. The feature is production-ready."
+

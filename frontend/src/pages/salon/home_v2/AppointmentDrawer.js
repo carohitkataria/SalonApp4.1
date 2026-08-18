@@ -68,9 +68,9 @@ const TIER_COLORS = {
 const tierOf = (t) => TIER_COLORS[t] || TIER_COLORS.Custom;
 
 const SHIFTS = [
-  { id: 'Morning', hint: '9AM–1PM' },
-  { id: 'Noon', hint: '1PM–5PM' },
-  { id: 'Evening', hint: '5PM–9PM' },
+  { id: 'Morning', ic: 'M', hint: '9AM–1PM' },
+  { id: 'Noon', ic: 'N', hint: '1PM–5PM' },
+  { id: 'Evening', ic: 'E', hint: '5PM–9PM' },
 ];
 const PAY_LABEL = { cash: 'Cash', upi: 'UPI', card: 'Card', wallet: 'Wallet' };
 const PAY_MODES = ['cash', 'upi', 'card', 'wallet'];
@@ -114,6 +114,7 @@ export default function AppointmentDrawer({
 
   /* catalog */
   const [category, setCategory] = useState('all');
+  const [offerType, setOfferType] = useState('svc'); // svc | pkg | mem | prod
   const [q, setQ] = useState('');
   const [selectedSvc, setSelectedSvc] = useState([]);
   const [sellMembershipId, setSellMembershipId] = useState(null);
@@ -145,7 +146,7 @@ export default function AppointmentDrawer({
   const [multiPay, setMultiPay] = useState(false);
 
   /* redesign 2026 — filters, variant pricing, per-service extras */
-  const [opsSettings, setOpsSettings] = useState({ multi_barber_enabled: false, per_service_discount_enabled: false, back_dated_invoice_enabled: false, stylist_required: true, show_online_prices: true });
+  const [opsSettings, setOpsSettings] = useState({ multi_barber_enabled: false, per_service_discount_enabled: false, back_dated_invoice_enabled: false, stylist_required: true, show_online_prices: true, direct_invoice_default: false });
   const [classification, setClassification] = useState({ tiers: ['Basic', 'Standard', 'Premium', 'Ultra'], lengths: ['Short', 'Medium', 'Long', 'XL'] });
   const [gender, setGender] = useState('Unisex');            // Men | Women | Unisex
   const [activeTier, setActiveTier] = useState(0);
@@ -199,7 +200,7 @@ export default function AppointmentDrawer({
     setCouponCode(''); setCouponApplied(false); setDiscountPct(0); setDiscountAbs(0);
     setTip(0); setFinalOverride(null);
     setPaySel(new Set(['upi'])); setPayAmt({}); setMultiPay(false);
-    setErrors({}); setCategory('fav'); setQ(''); setProductsOpen(false);
+    setErrors({}); setCategory('all'); setOfferType('svc'); setQ(''); setProductsOpen(false);
     setShowSug(false); setSubOpen(false); setEditOpen(false); setProfileOpen(false);
     setGender('Unisex'); setActiveTier(0); setActiveLen(0);
     setSvcVariant({}); setSvcDiscount({}); setSvcAlloc({}); setSettingsOpen(false);
@@ -216,7 +217,17 @@ export default function AppointmentDrawer({
           axios.get(`${API}/salons/${sid}/membership-plans`, { headers }).catch(() => ({ data: [] })),
         ]);
         // Feature flags + tier/length classification (best-effort).
-        axios.get(`${API}/salons/${sid}/ops-settings`).then((r) => r.data && setOpsSettings((o) => ({ ...o, ...r.data }))).catch(() => {});
+        axios.get(`${API}/salons/${sid}/ops-settings`).then((r) => {
+          if (!r.data) return;
+          setOpsSettings((o) => ({ ...o, ...r.data }));
+          // Default landing invoice type — Walk-in unless the salon opted into
+          // Direct invoice as default (and no calendar preset forces schedule).
+          const pr = presetRef.current;
+          const presetForcesSchedule = pr && (pr.shift || pr.barber_id || pr.date || pr.expected_time);
+          if (r.data.direct_invoice_default && !presetForcesSchedule && (modeRef.current || 'queue') === 'queue') {
+            setMode('direct');
+          }
+        }).catch(() => {});
         axios.get(`${API}/salons/${sid}/classification`).then((r) => r.data && setClassification((c) => ({ ...c, ...r.data }))).catch(() => {});
         setServices(Array.isArray(svcRes.data) ? svcRes.data : (svcRes.data?.services || []));
         setBarbers((Array.isArray(brbRes.data) ? brbRes.data : (brbRes.data?.barbers || [])).filter((b) => b.is_active !== false));
@@ -242,11 +253,29 @@ export default function AppointmentDrawer({
   }, [open]);
 
   /* ----------- derived: catalog + billing ----------- */
-  const categories = useMemo(() => {
+  // Offering type of a service: Packages vs Services (everything else).
+  const svcTypeOf = (s) => {
+    const c = String(s.category || '').toLowerCase();
+    return (c === 'packages' || c === 'package') ? 'pkg' : 'svc';
+  };
+  // Fine-grained bucket for the 2nd filter row (post taxonomy migration).
+  const subCatOf = (s) => s.sub_category || s.category || 'General';
+
+  const genderMatch = (s) => {
+    const t = s.gender_tag || 'Unisex';
+    return gender === 'Unisex' ? true : (t === gender || t === 'Unisex');
+  };
+
+  // Row-2 sub-category chips for the active offering type (svc / pkg).
+  const subCategories = useMemo(() => {
+    if (offerType !== 'svc' && offerType !== 'pkg') return [];
     const set = new Set();
-    services.forEach((s) => set.add(s.category || 'General'));
-    return ['fav', 'all', ...Array.from(set), 'mem'];
-  }, [services]);
+    services.forEach((s) => {
+      if (svcTypeOf(s) === offerType && genderMatch(s)) set.add(subCatOf(s));
+    });
+    return ['all', ...Array.from(set)];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [services, offerType, gender]);
 
   /* Variant (tier × length) price resolver — mirrors the service editor. */
   const variantKey = (axes, tIdx, lIdx) => {
@@ -315,7 +344,8 @@ export default function AppointmentDrawer({
     if (query) {
       const ms = services.filter((s) => byGender(s) && (
         (s.service_name || s.name || '').toLowerCase().includes(query) ||
-        (s.category || '').toLowerCase().includes(query)));
+        (s.category || '').toLowerCase().includes(query) ||
+        (s.sub_category || '').toLowerCase().includes(query)));
       const mm = memberships.filter((m) =>
         (m.name || '').toLowerCase().includes(query) ||
         (m.tier || '').toLowerCase().includes(query));
@@ -323,12 +353,17 @@ export default function AppointmentDrawer({
         (p.product_name || p.name || '').toLowerCase().includes(query));
       return { kind: 'search', services: ms, memberships: mm, products: mp };
     }
-    if (category === 'mem') return { kind: 'mem', memberships };
-    let list = services.filter(byGender);
-    if (category === 'fav') list = list.filter((s) => s.is_favorite);
-    else if (category !== 'all') list = list.filter((s) => (s.category || 'General') === category);
+    if (offerType === 'mem') return { kind: 'mem', memberships };
+    if (offerType === 'prod') return { kind: 'prod', products };
+    // svc or pkg — filter by offering type + gender + sub-category
+    let list = services.filter((s) => svcTypeOf(s) === offerType && byGender(s));
+    if (category && category !== 'all') list = list.filter((s) => subCatOf(s) === category);
     return { kind: 'svc', services: list };
-  }, [q, category, services, memberships, products, gender]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, category, offerType, services, memberships, products, gender]);
+
+  // Reset the sub-category row whenever the offering type changes.
+  useEffect(() => { setCategory('all'); }, [offerType]);
 
   const custSuggestions = useMemo(() => {
     const query = custSearch.trim().toLowerCase();
@@ -611,6 +646,7 @@ export default function AppointmentDrawer({
           selected_services: selectedSvc,
           services_payload,
           selected_products: products_payload,
+          invoice_date: (opsSettings.back_dated_invoice_enabled && date && date !== todayISO()) ? date : null,
           ...paymentPayload,
           ...billingExtras,
           source: 'direct',
@@ -708,6 +744,32 @@ export default function AppointmentDrawer({
               <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg><span>Schedule</span>
             </button>
           </div>
+          {/* Inline date / session — shown in the same top panel (redesign 2026) */}
+          {mode === 'direct' && opsSettings.back_dated_invoice_enabled && (
+            <div className="apt-topfield" data-testid="apt-direct-date">
+              <label>Invoice date</label>
+              <input type="date" max={todayISO()} value={date} onChange={(e) => setDate(e.target.value)} data-testid="apt-direct-date-input" />
+            </div>
+          )}
+          {mode === 'schedule' && (
+            <div className="apt-topfield apt-topsched" data-testid="apt-sched-top">
+              <div className="tf">
+                <label>Date</label>
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="apt-sched-date-input" />
+              </div>
+              <div className="tf">
+                <label>Session</label>
+                <div className="apt-session" data-testid="apt-session">
+                  {SHIFTS.map((s) => (
+                    <button key={s.id} type="button" className={slot === s.id ? 'on' : ''}
+                            title={`${s.id} · ${s.hint}`} onClick={() => setSlot(s.id)}
+                            data-testid={`apt-session-${s.ic}`}>{s.ic}</button>
+                  ))}
+                </div>
+              </div>
+              {errors.date && <span className="msg show">{errors.date}</span>}
+            </div>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
             <button className="apt-gear" title="Appointment settings" data-testid="apt-settings-btn"
                     onClick={() => setSettingsOpen((v) => !v)}
@@ -723,6 +785,7 @@ export default function AppointmentDrawer({
                   ['per_service_discount_enabled', 'Per-service discount %', 'Add a discount field on each line.'],
                   ['stylist_required', 'Stylist required for invoice', 'Force a barber before a direct invoice.'],
                   ['back_dated_invoice_enabled', 'Allow back-dated invoices', 'Show a past-date field on invoices.'],
+                  ['direct_invoice_default', 'Direct invoice as default', 'Land on Direct invoice instead of Walk-in.'],
                 ].map(([k, title, sub]) => (
                   <label key={k} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '8px 0', borderTop: '1px solid #ECECF3', cursor: 'pointer' }}>
                     <input type="checkbox" checked={opsSettings[k] !== false ? !!opsSettings[k] : false} data-testid={`apt-set-${k}`}
@@ -745,28 +808,7 @@ export default function AppointmentDrawer({
         <div className="book-split">
           {/* ============================= LEFT ============================= */}
           <div className="book-left">
-          {/* Modes moved to header. Schedule date/slot shown only when scheduling. */}
-            {mode === 'schedule' && (
-              <div className="block">
-                <div className="sched show">
-                  <div className="sf">
-                    <label>Date</label>
-                    <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-                  </div>
-                  <div className="sf grow">
-                    <label>Slot</label>
-                    <div className="seg-pick">
-                      {SHIFTS.map((s) => (
-                        <button key={s.id} type="button" className={slot === s.id ? 'on' : ''} onClick={() => setSlot(s.id)}>
-                          {s.id}<small>{s.hint}</small>
-                        </button>
-                      ))}
-                    </div>
-                    {errors.date && <span className="msg show">{errors.date}</span>}
-                  </div>
-                </div>
-              </div>
-            )}
+          {/* Modes moved to header. Schedule date/session now shown in the top panel. */}
 
             {/* Guest search relocated to the right "Guest details" card (redesign 2026). */}
 
@@ -787,24 +829,40 @@ export default function AppointmentDrawer({
                   ))}
                 </div>
               </div>
-              <div className="cat-bullets apt-cats-scroll">
-                {categories.map((c) => {
-                  const col = c === 'fav' ? { cc: '#C9992B', bg: '#FBF3DF' }
-                    : c === 'all' ? { cc: '#6C4FE0', bg: '#EFEBFE' }
-                    : c === 'mem' ? { cc: '#C9992B', bg: '#FBF3DF' }
-                    : catOf(c);
-                  const label = c === 'fav' ? '★ Favourites' : c === 'all' ? 'All' : c === 'mem' ? 'Memberships' : c;
-                  return (
-                    <button key={c} onClick={() => { setCategory(c); setQ(''); }}
-                            className={`${category === c && !q ? 'on' : ''} ${c === 'fav' ? 'apt-fav-chip' : ''}`}
-                            data-testid={`apt-cat-${c}`}
-                            title={c === 'fav' ? 'Favourites' : undefined}
-                            style={{ ['--cc']: col.cc, ['--ccbg']: col.bg }}>
-                      {c === 'fav' ? <span className="apt-fav-star">★</span> : <><span className="bd" />{label}</>}
-                    </button>
-                  );
-                })}
+              {/* Row 1 — offering type tabs */}
+              <div className="apt-offtabs" data-testid="apt-offer-tabs">
+                {[
+                  ['svc', 'Services', 'M4 7l8-4 8 4-8 4-8-4zm0 5l8 4 8-4M4 17l8 4 8-4'],
+                  ['pkg', 'Packages', 'M12 2l9 4.9V17L12 22 3 17V6.9L12 2zM3 7l9 5 9-5M12 12v10'],
+                  ['mem', 'Member', 'M3 5h18v14H3zM3 10h18'],
+                  ['prod', 'Product', 'M3 7h18v13H3zM3 7l3-4h12l3 4M9 12h6'],
+                ].map(([id, label, d]) => (
+                  <button key={id} type="button"
+                          className={`apt-offtab ${offerType === id && !q ? 'on' : ''}`}
+                          onClick={() => { setOfferType(id); setQ(''); }}
+                          data-testid={`apt-offer-${id}`}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d={d} /></svg>
+                    <span>{label}</span>
+                  </button>
+                ))}
               </div>
+              {/* Row 2 — sub-category chips (Services / Packages only) */}
+              {(offerType === 'svc' || offerType === 'pkg') && subCategories.length > 1 && (
+                <div className="cat-bullets apt-cats-scroll" data-testid="apt-subcats">
+                  {subCategories.map((c) => {
+                    const col = c === 'all' ? { cc: '#6C4FE0', bg: '#EFEBFE' } : catOf(c);
+                    const label = c === 'all' ? 'All' : c;
+                    return (
+                      <button key={c} onClick={() => { setCategory(c); setQ(''); }}
+                              className={`${category === c && !q ? 'on' : ''}`}
+                              data-testid={`apt-cat-${c}`}
+                              style={{ ['--cc']: col.cc, ['--ccbg']: col.bg }}>
+                        <span className="bd" />{label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               {(() => {
                 const list = filteredCatalog.services || [];
                 const anyTier = list.some((s) => (s.axes || []).includes('tier'));
@@ -888,6 +946,16 @@ export default function AppointmentDrawer({
                     </div>
                   ) : <div className="cat-empty">No services here.</div>
                 )}
+                {filteredCatalog.kind === 'prod' && (
+                  filteredCatalog.products.length ? (
+                    <div className="prod-sub">
+                      {filteredCatalog.products.map((p) => (
+                        <ProductChip key={p.id} p={p} qty={selectedProd[p.id] || 0}
+                          onDec={() => bumpProd(p.id, -1)} onInc={() => bumpProd(p.id, 1)} />
+                      ))}
+                    </div>
+                  ) : <div className="cat-empty">No products in inventory.</div>
+                )}
                     </div>
                   </div>
                 );
@@ -895,31 +963,6 @@ export default function AppointmentDrawer({
               {errors.svc && <span className="msg show" style={{ display: 'block', marginTop: 6 }}>{errors.svc}</span>}
             </div>
 
-            {/* Products collapsible */}
-            <div className="block">
-              <div className={`coll ${productsOpen ? 'open' : ''}`}>
-                <div className="coll__h" onClick={() => setProductsOpen((v) => !v)}>
-                  <div className="lft">
-                    <span className="pill">
-                      <svg viewBox="0 0 24 24"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
-                    </span>
-                    <span>Products {prodRows.length > 0 && <span style={{ color: '#9A6A3B' }}>· {prodRows.length} added</span>}</span>
-                  </div>
-                  <svg className="chev" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
-                </div>
-                <div className="coll__b">
-                  {products.length === 0 && <div className="cat-empty">No products in inventory.</div>}
-                  {products.length > 0 && (
-                    <div className="prod-sub">
-                      {products.slice(0, 30).map((p) => (
-                        <ProductChip key={p.id} p={p} qty={selectedProd[p.id] || 0}
-                          onDec={() => bumpProd(p.id, -1)} onInc={() => bumpProd(p.id, 1)} />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
           </div>
 
           {/* ============================= MIDDLE (barber rail) ============================= */}

@@ -39,6 +39,11 @@ function injectCss() {
 .svc2 *{box-sizing:border-box}
 .svc2 button{font-family:inherit;cursor:pointer}
 .svc2 .num{font-variant-numeric:tabular-nums}
+.svc2 .phead{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:14px;padding:0 6px}
+.svc2 .phead h2{font-size:22px;font-weight:800;letter-spacing:-.5px;display:flex;align-items:center;gap:10px;color:var(--ink);margin:0}
+.svc2 .phead .hic{width:34px;height:34px;border-radius:10px;background:var(--p05);color:var(--p);display:grid;place-items:center;flex:none}
+.svc2 .phead .hic svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:2}
+.svc2 .phead .psub{font-size:12.5px;color:var(--mut);font-weight:600;margin-top:2px}
 .svc2 .main{display:grid;grid-template-columns:290px 1fr;min-height:0;flex:1;border:1.5px solid var(--line);border-radius:14px;overflow:hidden;background:var(--sf)}
 .svc2 .listcol{border-right:1.5px solid var(--line);background:var(--sf);display:flex;flex-direction:column;min-height:0}
 .svc2 .typetabs{display:flex;gap:4px;padding:8px 8px 0}
@@ -361,6 +366,17 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
 
   return (
     <div className="svc2">
+      <div className="phead">
+        <div>
+          <h2>
+            <span className="hic">
+              <svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.66 5.66l1.06 1.06L4 19.14 4.86 20l6.12-6.12 1.06 1.06a4 4 0 0 0 5.66-5.66"/><circle cx="8" cy="8" r="2.2"/></svg>
+            </span>
+            Services &amp; Packages
+          </h2>
+          <div className="psub">Manage your service menu, packages, prices and classifications.</div>
+        </div>
+      </div>
       <div className="main">
         {/* -------- LIST -------- */}
         <div className="listcol">

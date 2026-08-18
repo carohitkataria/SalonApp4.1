@@ -2472,6 +2472,26 @@ def attribute_token_revenue_to_barbers(token: dict) -> Dict[str, float]:
         sp = float(a.get("service_price") or 0)
         share = (discount_amt * (sp / subtotal)) if subtotal > 0 else 0.0
         line_attr = sp - share
+        # Multi-barber split: divide this line's revenue across the listed
+        # barbers by their percentage. Percentages that don't sum to 100 are
+        # normalised so the full line value is always attributed.
+        allocs = a.get("barber_allocations")
+        if isinstance(allocs, list) and allocs:
+            valid = [x for x in allocs if isinstance(x, dict) and x.get("barber_id")]
+            pct_total = sum(float(x.get("pct") or 0) for x in valid)
+            if valid and pct_total > 0:
+                for x in valid:
+                    bid_x = x.get("barber_id")
+                    frac = float(x.get("pct") or 0) / pct_total
+                    out[bid_x] = out.get(bid_x, 0.0) + line_attr * frac
+                continue
+            elif valid:
+                # No usable percentages → split evenly.
+                each = line_attr / len(valid)
+                for x in valid:
+                    bid_x = x.get("barber_id")
+                    out[bid_x] = out.get(bid_x, 0.0) + each
+                continue
         bid = a.get("barber_id")
         if not bid:
             continue
@@ -3186,27 +3206,77 @@ async def generate_and_send_invoice(token_id: str):
         services_data = []
         render_items = []
         subtotal = 0.0
+        # Per-service assignments carry the served stylist, tier/length, list
+        # price and per-service discount (from the appointment page).
+        _assignments = token.get('service_assignments') or []
+        _asg_by_svc = {a.get('service_id'): a for a in _assignments if isinstance(a, dict) and a.get('service_id')}
+        _barber_name_cache: Dict[str, str] = {}
+
+        async def _barber_name(bid):
+            if not bid:
+                return ""
+            if bid in _barber_name_cache:
+                return _barber_name_cache[bid]
+            _b = await db.barbers.find_one({"id": bid}, {"_id": 0, "name": 1})
+            nm = (_b or {}).get("name") or ""
+            _barber_name_cache[bid] = nm
+            return nm
+
+        def _variant_gender_desc(svc, asg):
+            bits = []
+            if asg and asg.get('tier'):
+                bits.append(str(asg.get('tier')))
+            if asg and asg.get('length'):
+                bits.append(str(asg.get('length')))
+            g = (svc or {}).get('gender_tag') or (svc or {}).get('gender')
+            if g and str(g) not in ('Unisex', 'Both', 'unisex'):
+                bits.append(str(g))
+            return " \u00b7 ".join(bits)
+
         for service_id in token.get('selected_services', []):
             service = await db.services.find_one({"id": service_id}, {"_id": 0})
-            if service:
-                price = float(service.get('base_price', 0) or 0)
-                duration = int(service.get('default_duration') or 0)
-                sac = service.get('hsn_code') or inv_settings.get('sac_code')
-                services_data.append({
-                    "name": service.get('service_name'),
-                    "price": price,
-                    "discount": 0,
-                    "amount": price,
-                })
-                render_items.append({
-                    "name": service.get('service_name'),
-                    "desc": (f"{duration} min" if duration else ""),
-                    "sac": sac,
-                    "qty": 1,
-                    "rate": price,
-                    "amount": price,
-                })
-                subtotal += price
+            if not service:
+                continue
+            base_price = float(service.get('base_price', 0) or 0)
+            sac = service.get('hsn_code') or inv_settings.get('sac_code')
+            asg = _asg_by_svc.get(service_id)
+            if asg:
+                net_price = float(asg.get('service_price') or 0)
+                list_price = float(asg.get('list_price') or net_price or base_price)
+                disc_pct = float(asg.get('discount_percent') or 0)
+                stylist = asg.get('barber_name_snapshot') or token.get('barber_name') or ''
+                allocs = [x for x in (asg.get('barber_allocations') or []) if isinstance(x, dict) and x.get('barber_id')]
+                if len(allocs) > 1:
+                    names = []
+                    for x in allocs:
+                        nm = await _barber_name(x.get('barber_id'))
+                        pct = x.get('pct')
+                        names.append(f"{nm} {int(pct)}%" if (nm and pct) else (nm or ''))
+                    stylist = " + ".join([n for n in names if n]) or stylist
+            else:
+                list_price = base_price
+                net_price = base_price
+                disc_pct = 0.0
+                stylist = token.get('barber_name') or ''
+            disc_amt = round(max(0.0, list_price - net_price), 2)
+            services_data.append({
+                "name": service.get('service_name'),
+                "price": list_price,
+                "discount": disc_amt,
+                "amount": net_price,
+            })
+            render_items.append({
+                "name": service.get('service_name'),
+                "desc": _variant_gender_desc(service, asg),
+                "stylist": stylist,
+                "sac": sac,
+                "qty": 1,
+                "rate": list_price,
+                "discount": disc_amt,
+                "discount_pct": disc_pct,
+                "amount": net_price,
+            })
+            subtotal += net_price
 
         # ---- Discounts / tip from the token record ----
         discount_amount = float(token.get('order_discount_amount') or 0)
@@ -3363,7 +3433,7 @@ async def generate_and_send_invoice(token_id: str):
             "customer": {
                 "name": token.get('customer_name', 'Customer'),
                 "phone": token.get('phone', ''),
-                "tier": member_tier,
+                "tier": None,
             },
             "served_by": {"name": token.get('barber_name') or 'Salon', "role": ''},
             "items": render_items,
@@ -5484,6 +5554,7 @@ DEFAULT_OPS_SETTINGS = {
     "back_dated_invoice_enabled": False, # allow past-dated invoices
     "stylist_required": True,            # stylist mandatory for direct invoice
     "show_online_prices": True,          # show prices to online customers
+    "direct_invoice_default": False,     # land on Direct invoice by default (else Walk-in)
 }
 
 
@@ -9795,13 +9866,22 @@ async def create_salon_booking(salon_id: str, body: dict, current_user=Depends(g
         line_barber = (sp.get("barber_id") if isinstance(sp, dict) else None) or barber_id
         if not svc_id or not line_barber or line_barber == "any":
             continue
-        line_price = await _resolve_assignment_price(line_barber, svc_id)
+        list_price = float(await _resolve_assignment_price(line_barber, svc_id) or 0)
+        # Per-service discount % (feature-flag gated on the frontend)
+        _disc_pct = 0.0
+        if isinstance(sp, dict) and sp.get("discount_percent") is not None:
+            try:
+                _disc_pct = max(0.0, min(100.0, float(sp.get("discount_percent") or 0)))
+            except (TypeError, ValueError):
+                _disc_pct = 0.0
+        net_price = round(list_price * (1 - _disc_pct / 100.0), 2) if _disc_pct > 0 else round(list_price, 2)
         lb = await db.barbers.find_one({"id": line_barber, "salon_id": salon_id}, {"_id": 0, "name": 1})
         _asg = {
             "service_id": svc_id,
             "barber_id": line_barber,
             "barber_name_snapshot": (lb or {}).get("name", ""),
-            "service_price": round(float(line_price or 0), 2),
+            "service_price": net_price,
+            "list_price": round(list_price, 2),
         }
         # Per-service multi-barber allocation (each {barber_id, pct}) + per-service discount %
         if isinstance(sp, dict):
@@ -9811,20 +9891,28 @@ async def create_salon_booking(salon_id: str, body: dict, current_user=Depends(g
                     {"barber_id": a.get("barber_id"), "pct": round(float(a.get("pct") or 0), 2)}
                     for a in allocs if isinstance(a, dict) and a.get("barber_id")
                 ]
-            if sp.get("discount_percent") is not None:
-                _asg["discount_percent"] = round(float(sp.get("discount_percent") or 0), 2)
+            if _disc_pct > 0:
+                _asg["discount_percent"] = round(_disc_pct, 2)
             if sp.get("tier"):
                 _asg["tier"] = sp.get("tier")
             if sp.get("length"):
                 _asg["length"] = sp.get("length")
         service_assignments.append(_asg)
         _distinct_line_barbers.add(line_barber)
-    # Only keep assignments when they add information (a real split across ≥2 barbers).
-    if len(_distinct_line_barbers) <= 1:
+    # Keep assignments for a real barber-split (≥2) OR when any line carries
+    # a multi-barber allocation / per-service discount (extra info worth storing).
+    _has_extra = any(("barber_allocations" in a or "discount_percent" in a) for a in service_assignments)
+    if len(_distinct_line_barbers) <= 1 and not _has_extra:
         service_assignments = []
     else:
-        # Recompute total from per-line prices so the bill matches attribution.
+        # Recompute the services subtotal from per-line (discounted) prices so the
+        # bill matches attribution. Services with no assignment fall back to base.
+        _assigned_ids = {a["service_id"] for a in service_assignments}
         _svc_subtotal = sum(a["service_price"] for a in service_assignments)
+        for _sid in selected_services:
+            if _sid not in _assigned_ids:
+                _svc = await db.services.find_one({"id": _sid}, {"_id": 0})
+                _svc_subtotal += float((_svc or {}).get("base_price") or 0)
         _products_total = sum(float(pd.get("line_total") or 0) for pd in product_details)
         total_amount = round(_svc_subtotal + _products_total, 2)
 
@@ -15076,6 +15164,8 @@ async def create_direct_invoice(
             _disc_pct = float(_meta.get("discount_percent") or 0)
         except (TypeError, ValueError):
             _disc_pct = 0.0
+        _disc_pct = max(0.0, min(100.0, _disc_pct))
+        _list_price = round(price, 2)  # pre-discount price (for the invoice)
         if _disc_pct > 0:
             price = round(price * (1 - _disc_pct / 100.0), 2)
         subtotal += price
@@ -15087,6 +15177,7 @@ async def create_direct_invoice(
                 "barber_id": line_barber,
                 "barber_name_snapshot": (lb or {}).get("name", ""),
                 "service_price": round(price, 2),
+                "list_price": _list_price,
             }
             allocs = _meta.get("barber_allocations")
             if isinstance(allocs, list) and allocs:
@@ -15262,6 +15353,18 @@ async def create_direct_invoice(
     # -- Create synthetic completed token --
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     now_iso = datetime.now(timezone.utc).isoformat()
+    # Back-dated invoice — only when the salon enabled it and the date is in the past.
+    _req_date = str(body.get("invoice_date") or body.get("date") or "").strip()
+    if _req_date:
+        try:
+            _bd = datetime.strptime(_req_date[:10], "%Y-%m-%d").date()
+            if _bd < datetime.now(timezone.utc).date():
+                _ops = await db.salon_ops_settings.find_one({"salon_id": salon_id}, {"_id": 0}) or {}
+                if _ops.get("back_dated_invoice_enabled"):
+                    today_str = _bd.isoformat()
+                    now_iso = datetime(_bd.year, _bd.month, _bd.day, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+        except (ValueError, TypeError):
+            pass
 
     from datetime import datetime as _dt
     _h = _dt.now().hour
