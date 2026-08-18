@@ -8237,6 +8237,7 @@ async def get_salon_customers(salon_id: str, branch_id: Optional[str] = None, cu
                 "facebook_id": mc.get('facebook_id'),
                 "preferred_barber_id": mc.get('preferred_barber_id'),
                 "tags": mc.get('tags') or [],
+                "custom_tags": mc.get('custom_tags') or [],
                 "id": mc.get('id'),
                 # Seed-friendly aggregate fields (used by Guests V2 page)
                 "visit_count": mc.get('visit_count'),
@@ -8258,6 +8259,7 @@ async def get_salon_customers(salon_id: str, branch_id: Optional[str] = None, cu
             cust.setdefault('facebook_id', mc.get('facebook_id'))
             cust.setdefault('preferred_barber_id', mc.get('preferred_barber_id'))
             cust.setdefault('tags', mc.get('tags') or [])
+            cust.setdefault('custom_tags', mc.get('custom_tags') or [])
             cust.setdefault('id', mc.get('id'))
             # Prefer master-doc aggregates when present (seeded data / manual overrides)
             if mc.get('visit_count') is not None:
@@ -8294,6 +8296,7 @@ async def get_salon_customers(salon_id: str, branch_id: Optional[str] = None, cu
     # Attach last visit date computed from tokens
     for phone, cust in customers_map.items():
         cust['last_visit'] = last_visit_by_phone.get(phone)
+        cust.setdefault('custom_tags', [])
     
     # Attach active wallet balance for each customer (if any active membership)
     if customers_map:
@@ -8384,6 +8387,61 @@ async def add_salon_customer(salon_id: str, body: dict, current_user=Depends(get
     customer.pop("_id", None)
     
     return {"message": "Customer added", "customer": customer}
+
+
+@api_router.put("/salons/{salon_id}/customers/{phone}/tags")
+async def update_customer_custom_tags(salon_id: str, phone: str, body: dict, current_user=Depends(get_current_salon_user)):
+    """Set the manual/custom tags for a customer (by phone).
+
+    Segment tags (VIP / New / Lapsed / Member / Regular) are auto-computed on the
+    client and are NOT stored here — only owner-added custom tags are persisted.
+    Creates a lightweight salon_customers master doc if one does not exist yet.
+    """
+    raw = body.get("custom_tags")
+    if raw is None:
+        raw = body.get("tags")
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="custom_tags must be a list")
+    # Normalise: trim, drop empties/dupes, cap length, reserve system tag names.
+    reserved = {"vip", "new", "lapsed", "mem", "member", "reg", "regular"}
+    seen = set()
+    tags = []
+    for t in raw:
+        s = str(t or "").strip()
+        if not s:
+            continue
+        key = s.lower()
+        if key in reserved or key in seen:
+            continue
+        seen.add(key)
+        tags.append(s[:24])
+        if len(tags) >= 12:
+            break
+
+    ph = phone.replace(" ", "").replace("-", "")
+    if ph and not ph.startswith("+"):
+        ph = f"+91{ph}" if not ph.startswith("91") else f"+{ph}"
+
+    existing = await db.salon_customers.find_one({"salon_id": salon_id, "phone": ph}, {"_id": 0, "id": 1})
+    if existing:
+        await db.salon_customers.update_one(
+            {"id": existing["id"]},
+            {"$set": {"custom_tags": tags}}
+        )
+    else:
+        # Seed a minimal master doc so the tags persist for a token-only guest.
+        tok = await db.tokens.find_one({"salon_id": salon_id, "phone": ph}, {"_id": 0, "customer_name": 1})
+        await db.salon_customers.insert_one({
+            "id": str(uuid.uuid4()),
+            "salon_id": salon_id,
+            "branch_id": await resolve_branch_id(salon_id, None),
+            "name": (tok or {}).get("customer_name") or "Guest",
+            "phone": ph,
+            "custom_tags": tags,
+            "source": "owner",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    return {"message": "Tags updated", "custom_tags": tags}
 
 
 @api_router.put("/salons/{salon_id}/customers/{phone}")
