@@ -336,12 +336,11 @@ export default function CustomersV2({ salonId, getAuthHeaders, salon }) {
               {f.label} <b>{f.c}</b>
             </button>
           ))}
-          <div className="v2-searchbox v2-searchbox--inline">
-            <Ico.search />
-            <input placeholder="Search name or mobile…" value={search} onChange={(e) => setSearch(e.target.value)} />
-          </div>
         </div>
-        <div style={{flex:1}} />
+        <div className="v2-searchbox cust-search">
+          <Ico.search />
+          <input placeholder="Search name or mobile…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
         <button className="btn-primary btn-icononly" onClick={() => setAddOpen(true)} title="Add guest" aria-label="Add guest" data-testid="cust-add-guest"><Ico.plus /></button>
         <button className="btn-ghost btn-icononly" onClick={exportCSV} title="Export CSV" aria-label="Export CSV" data-testid="cust-export"><Ico.down /></button>
         <button

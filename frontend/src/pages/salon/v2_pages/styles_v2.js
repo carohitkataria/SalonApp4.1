@@ -259,10 +259,10 @@ export const V2_PAGES_CSS = `
 .shv2 .cust-filter-scroll::-webkit-scrollbar{height:5px}
 .shv2 .cust-filter-scroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:20px}
 .shv2 .cust-filter-scroll .fchip{padding:6px 10px;font-size:12px;flex:none;white-space:nowrap}
-/* Inline search living inside the filter row (after Birthday) */
-.shv2 .v2-searchbox--inline{width:220px;flex:none;padding:6px 12px;margin-left:2px}
-.shv2 .v2-searchbox--inline svg{width:15px;height:15px}
-.shv2 .v2-searchbox--inline input{font-size:12.5px}
+/* Search box now lives beside the action buttons (before "+") */
+.shv2 .cust-search{width:240px;flex:none;padding:7px 12px}
+.shv2 .cust-search svg{width:16px;height:16px}
+.shv2 .cust-search input{font-size:12.5px}
 /* Icon-only toolbar buttons */
 .shv2 .btn-icononly{padding:0;width:38px;height:38px;justify-content:center;gap:0;flex:none;border-radius:11px}
 .shv2 .btn-icononly svg{width:17px;height:17px}
