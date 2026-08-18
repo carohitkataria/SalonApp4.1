@@ -33,7 +33,14 @@ export const STAFF_V3_CSS = `
 .staffv3 .pane-l{border-right:1px solid var(--line);background:#FDFAFC;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .staffv3 .pane-r{min-width:0;display:flex;flex-direction:column;background:#fff;min-height:0;overflow-y:auto}
 .staffv3 .list-head{padding:14px 13px 10px;border-bottom:1px solid var(--line)}
-.staffv3 .list-head .lt{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.staffv3 .list-head .lt{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.staffv3 .list-head .lt .lt-actions{margin-left:auto;display:flex;align-items:center;gap:6px}
+.staffv3 .sq-btn{width:30px;height:30px;border-radius:9px;border:1px solid var(--line);background:var(--surface,#fff);color:var(--muted);display:grid;place-items:center;cursor:pointer;transition:.15s;padding:0}
+.staffv3 .sq-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2}
+.staffv3 .sq-btn:hover{border-color:var(--primary);color:var(--primary)}
+.staffv3 .sq-btn.on{border-color:var(--primary);background:var(--primary-050);color:var(--primary)}
+.staffv3 .sq-btn--pri{background:var(--primary);border-color:var(--primary);color:#fff}
+.staffv3 .sq-btn--pri:hover{background:var(--primary-600,#5B3FD1);color:#fff}
 .staffv3 .list-head .lt b{font-size:13.5px;font-weight:800;display:flex;align-items:center;gap:8px;color:var(--ink)}
 .staffv3 .list-head .lt b .dotg{width:8px;height:8px;border-radius:50%;background:var(--green)}
 .staffv3 .list-head .lt .ct{font-size:12px;color:var(--muted);font-weight:600}
