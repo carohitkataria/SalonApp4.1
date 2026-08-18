@@ -89,6 +89,7 @@ function App() {
                   <Route path="/login" element={<UserLoginPage />} />
                   <Route path="/privacy" element={<PrivacyPolicyPage />} />
                   <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
+                  <Route path="/data-deletion" element={<PrivacyPolicyPage />} />
                   <Route path="/user/login" element={<Navigate to="/login" replace />} />
                   <Route path="/auth/callback" element={<AuthCallback />} />
                   

@@ -128,7 +128,27 @@ export default function PrivacyPolicyPage() {
           <p>We may update this policy from time to time. When we do, we will revise the &ldquo;Last updated&rdquo; date above and, where appropriate, notify you. Continued use of the Service after changes take effect means you accept the updated policy.</p>
         </Section>
 
-        <Section n={13} title="Contact us">
+        <Section n={13} title="Data deletion">
+          <p>You can request deletion of your personal data at any time.</p>
+          <p className="font-semibold text-espresso">If you are a salon (account holder)</p>
+          <ol className="list-decimal pl-5 space-y-1">
+            <li>Sign in to SalonHub and open <strong>Settings → Business profile</strong>.</li>
+            <li>Choose <strong>Delete account</strong>, or email us from your registered email.</li>
+            <li>We remove your account, business profile, staff records, customer records and connected WhatsApp configuration held by SalonHub.</li>
+          </ol>
+          <p className="font-semibold text-espresso">If you are a salon&rsquo;s customer</p>
+          <p>Your booking and contact details are held on behalf of the salon you visited. Ask that salon to delete your details, or email us directly and we will action the request and coordinate with the salon.</p>
+          <p className="font-semibold text-espresso">Request by email</p>
+          <p>Email <a href="mailto:rohit@salonhub.in?subject=Data%20deletion%20request" className="text-brass font-medium hover:underline">rohit@salonhub.in</a> with the subject <strong>&ldquo;Data deletion request&rdquo;</strong>, from the email or phone number linked to your account or booking. Include your name and, if you are a customer, the salon you visited.</p>
+          <p className="font-semibold text-espresso">What we delete and when</p>
+          <ul className="list-disc pl-5 space-y-1">
+            <li>We delete the personal data we hold for you — account details, business profile, booking history, message records and connected WhatsApp configuration.</li>
+            <li>Requests are actioned within 30 days of verification.</li>
+            <li>We may retain limited data where required by law (e.g. tax/accounting records), only for as long as the law requires.</li>
+          </ul>
+        </Section>
+
+        <Section n={14} title="Contact us">
           <p><strong>SalonHub.in</strong><br />India</p>
           <p>Email: <a href="mailto:rohit@salonhub.in" className="text-brass font-medium hover:underline">rohit@salonhub.in</a></p>
           <p>Grievance Officer: Rohit — <a href="mailto:rohit@salonhub.in" className="text-brass font-medium hover:underline">rohit@salonhub.in</a></p>
