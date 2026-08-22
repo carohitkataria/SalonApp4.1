@@ -185,6 +185,18 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
   const [selectedId, setSelectedId] = useState(null);
   const [section, setSection] = useState('profile');
   const [viewMode, setViewMode] = useState('staff'); // 'staff' | 'roles'
+  // Section 2 — quick attendance ribbon + salary basis setting
+  const [ribbonOpen, setRibbonOpen] = useState(false);
+  const [ribbonStatus, setRibbonStatus] = useState({}); // { barber_id: 'present'|'absent'|... }
+  const [ribbonBusy, setRibbonBusy] = useState(false);
+  const [todayStatus, setTodayStatus] = useState({}); // reflected on list rows after save
+  const [prorationBasis, setProrationBasis] = useState('calendar_days');
+  useEffect(() => {
+    if (!salonId) return;
+    axios.get(`${API}/salons/${salonId}/salary-settings`, { headers: getAuthHeaders?.() || {} })
+      .then((r) => setProrationBasis(r.data?.salary_proration_basis || 'calendar_days'))
+      .catch(() => { /* keep default */ });
+  }, [salonId]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
@@ -1202,8 +1214,16 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
                 <div className="av" style={{ background: colorFor(s.name) }}>{initial(s.name)}</div>
                 <div className="si">
                   <b>{s.name}</b>
-                  <span>{(s.category || 'Junior')} · {s.experience || 0} yr{s.experience === 1 ? '' : 's'}</span>
+                  <span>{(s.category || 'Junior')} · {s.experience || 0} yr{s.experience === 1 ? '' : 's'}
+                    {baseSalaryOf(s.compensation) > 0 ? ` · ₹${baseSalaryOf(s.compensation).toLocaleString('en-IN')}/mo` : ''}
+                  </span>
                 </div>
+                {todayStatus[s.id] && ATT_META[todayStatus[s.id]] && (
+                  <span title={`Today: ${ATT_META[todayStatus[s.id]].full}`}
+                    style={{ fontSize: 10, fontWeight: 900, borderRadius: 6, padding: '2px 7px', marginRight: 4, background: ATT_META[todayStatus[s.id]].bg, color: ATT_META[todayStatus[s.id]].fg }}>
+                    {ATT_META[todayStatus[s.id]].lb}
+                  </span>
+                )}
                 <svg className="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
               </div>
               {on && (
@@ -1754,6 +1774,55 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     );
   };
 
+  // ---------- Section 2/3: quick attendance ribbon + salary basis ----------
+  const ATT_CYCLE = ['present', 'half_day', 'absent', 'holiday', 'on_leave'];
+  const ATT_META = {
+    present:  { lb: 'P',  full: 'Present',  bg: '#E4F6ED', fg: '#1F8F52' },
+    half_day: { lb: 'HD', full: 'Half day', bg: '#F1EEFF', fg: '#6C4FE0' },
+    absent:   { lb: 'A',  full: 'Absent',   bg: '#FCE4EC', fg: '#C33C5F' },
+    holiday:  { lb: 'H',  full: 'Holiday',  bg: '#F1F2F6', fg: '#7C8092' },
+    on_leave: { lb: 'L',  full: 'On leave', bg: '#FFF3DC', fg: '#B87A0A' },
+  };
+  const openRibbon = () => {
+    // default everyone to Present (one-tap mark-all-present, then tweak)
+    const init = {};
+    (staff || []).forEach((s) => { init[s.id] = todayStatus[s.id] || 'present'; });
+    setRibbonStatus(init);
+    setRibbonOpen(true);
+  };
+  const cycleRibbon = (id) => {
+    setRibbonStatus((prev) => {
+      const cur = prev[id] || 'present';
+      const next = ATT_CYCLE[(ATT_CYCLE.indexOf(cur) + 1) % ATT_CYCLE.length];
+      return { ...prev, [id]: next };
+    });
+  };
+  const setAllRibbon = (status) => {
+    const m = {}; (staff || []).forEach((s) => { m[s.id] = status; }); setRibbonStatus(m);
+  };
+  const saveRibbon = async () => {
+    setRibbonBusy(true);
+    try {
+      const rows = Object.entries(ribbonStatus).map(([barber_id, status]) => ({ barber_id, status }));
+      const res = await axios.post(`${API}/salons/${salonId}/attendance/mark`, { rows },
+        { headers: getAuthHeaders?.() || {} });
+      setTodayStatus({ ...ribbonStatus });
+      toast.success(`Attendance saved for ${res.data?.count ?? rows.length} staff`);
+      setRibbonOpen(false);
+    } catch (err) {
+      toast.error(formatApiError(err, 'Could not save attendance'));
+    } finally { setRibbonBusy(false); }
+  };
+  const changeBasis = async (val) => {
+    setProrationBasis(val);
+    try {
+      await axios.put(`${API}/salons/${salonId}/salary-settings`, { salary_proration_basis: val },
+        { headers: getAuthHeaders?.() || {} });
+      toast.success('Salary calculation basis updated');
+      if (selectedId && section === 'salary') { try { await bindSalary?.(salMonth); } catch (_) { /* ignore */ } }
+    } catch (err) { toast.error(formatApiError(err, 'Could not update setting')); }
+  };
+
   return (
     <div className="staffv3">
       <div className="phead">
@@ -1764,6 +1833,69 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
           Staff Management
         </h2>
       </div>
+
+      {/* Section 2 — quick attendance ribbon + salary basis (admins only) */}
+      {viewMode === 'staff' && canAttendance && (
+        <div className="ssv3-ribbon" style={{ background: '#fff', border: '1px solid #ECECF3', borderRadius: 14, padding: '10px 14px', marginBottom: 14, boxShadow: '0 4px 16px rgba(30,32,50,.04)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: '#23252F' }}>Today&apos;s attendance</span>
+              <span style={{ fontSize: 12, color: '#7C8092', fontWeight: 600 }}>{new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              {canSalaryView && (
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#7C8092', fontWeight: 700 }}>
+                  Salary basis
+                  <select value={prorationBasis} onChange={(e) => changeBasis(e.target.value)} disabled={!isAdmin}
+                    data-testid="salary-basis-select"
+                    style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '5px 8px', fontSize: 12, fontWeight: 700, color: '#23252F', background: '#fff', cursor: isAdmin ? 'pointer' : 'not-allowed' }}>
+                    <option value="calendar_days">Calendar days (offs paid)</option>
+                    <option value="working_days">Working days only</option>
+                  </select>
+                </label>
+              )}
+              <button className="btn-primary" style={{ padding: '8px 16px', fontSize: 12.5, fontWeight: 800, borderRadius: 10, border: 'none', background: 'linear-gradient(135deg,#6C4FE0,#8464F5)', color: '#fff', cursor: 'pointer' }}
+                onClick={() => (ribbonOpen ? setRibbonOpen(false) : openRibbon())} data-testid="quick-attendance-toggle">
+                {ribbonOpen ? 'Close' : 'Mark attendance'}
+              </button>
+            </div>
+          </div>
+          {ribbonOpen && (
+            <div style={{ marginTop: 12, borderTop: '1px solid #F2F2F7', paddingTop: 12 }}>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Quick set all:</span>
+                {ATT_CYCLE.map((st) => (
+                  <button key={st} onClick={() => setAllRibbon(st)}
+                    style={{ fontSize: 11, fontWeight: 800, border: 'none', borderRadius: 8, padding: '4px 10px', cursor: 'pointer', background: ATT_META[st].bg, color: ATT_META[st].fg }}>
+                    {ATT_META[st].full}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8 }}>
+                {(staff || []).map((s) => {
+                  const st = ribbonStatus[s.id] || 'present';
+                  const m = ATT_META[st];
+                  return (
+                    <button key={s.id} onClick={() => cycleRibbon(s.id)} data-testid={`ribbon-staff-${s.id}`}
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, border: '1px solid #ECECF3', borderRadius: 10, padding: '8px 10px', background: '#fff', cursor: 'pointer', textAlign: 'left' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                        <span style={{ width: 26, height: 26, borderRadius: 8, background: colorFor(s.name), color: '#fff', fontSize: 11, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>{initial(s.name)}</span>
+                        <span style={{ fontSize: 12.5, fontWeight: 700, color: '#23252F', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
+                      </span>
+                      <span style={{ fontSize: 11, fontWeight: 900, borderRadius: 7, padding: '3px 9px', background: m.bg, color: m.fg, flex: 'none' }}>{m.lb}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+                <button onClick={() => setRibbonOpen(false)} style={{ fontSize: 12.5, fontWeight: 700, border: '1px solid #ECECF3', background: '#fff', color: '#5A5E70', borderRadius: 10, padding: '9px 16px', cursor: 'pointer' }}>Cancel</button>
+                <button onClick={saveRibbon} disabled={ribbonBusy} data-testid="quick-attendance-save"
+                  style={{ fontSize: 12.5, fontWeight: 800, border: 'none', background: '#2FA96A', color: '#fff', borderRadius: 10, padding: '9px 20px', cursor: 'pointer' }}>{ribbonBusy ? 'Saving…' : 'Save attendance'}</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className={`workspace ${viewMode === 'roles' ? 'workspace--full' : ''}`}>
         {viewMode === 'roles' ? (

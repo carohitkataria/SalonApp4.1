@@ -71,7 +71,16 @@ load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
+client = AsyncIOMotorClient(
+    mongo_url,
+    maxPoolSize=50,
+    minPoolSize=5,
+    serverSelectionTimeoutMS=5000,   # fail fast instead of hanging ~30s
+    connectTimeoutMS=5000,
+    socketTimeoutMS=20000,
+    retryWrites=True,
+    compressors="zstd,zlib",  # smaller payloads over the wire
+)
 db = client[os.environ['DB_NAME']]
 
 # JWT Configuration — fail fast if not configured (no insecure fallback).
@@ -2918,6 +2927,17 @@ async def twilio_inbound_whatsapp(request: Request):
 
 
 async def send_booking_notification(token_data: dict, notification_type: str):
+    """Schedule a WhatsApp booking notification WITHOUT blocking the request.
+
+    Section 0.1 Step C — the customer's booking action (create/complete/your-turn
+    /cancel/etc.) must not wait on the Twilio round-trip. We fire the real send on
+    the event loop as a detached task and return immediately. The underlying
+    implementation catches all its own exceptions, so the task never raises.
+    """
+    asyncio.create_task(_send_booking_notification_impl(token_data, notification_type))
+
+
+async def _send_booking_notification_impl(token_data: dict, notification_type: str):
     """Send WhatsApp notification for booking events"""
     try:
         phone = token_data.get('phone')
@@ -4485,6 +4505,41 @@ async def update_salon(salon_id: str, salon: SalonUpdate, current_user=Depends(g
     
     updated = await db.salons.find_one({"id": salon_id}, {"_id": 0})
     return Salon(**updated)
+
+
+# ============ Section 3 — Salary proration basis setting ============
+VALID_PRORATION_BASIS = {"calendar_days", "working_days"}
+
+
+class SalarySettingsIn(BaseModel):
+    salary_proration_basis: str  # 'calendar_days' | 'working_days'
+
+
+@api_router.get("/salons/{salon_id}/salary-settings")
+async def get_salary_settings(salon_id: str, current_user=Depends(get_current_salon_user)):
+    """Return the salon's salary proration basis (defaults to calendar_days)."""
+    salon = await db.salons.find_one({"id": salon_id}, {"_id": 0, "salary_proration_basis": 1})
+    if salon is None:
+        raise HTTPException(status_code=404, detail="Salon not found")
+    return {"salary_proration_basis": (salon or {}).get("salary_proration_basis") or "calendar_days"}
+
+
+@api_router.put("/salons/{salon_id}/salary-settings")
+async def set_salary_settings(salon_id: str, body: SalarySettingsIn,
+                              current_user=Depends(get_current_salon_admin)):
+    """Set how monthly salary is prorated.
+      calendar_days — base ÷ total days in month (weekly-offs & holidays paid).
+      working_days  — base ÷ (days − offs − holidays); each absent day costs more.
+    """
+    token_salon_id = current_user.get("salon_id") or current_user.get("sub")
+    if token_salon_id != salon_id:
+        raise HTTPException(status_code=403, detail="Not allowed for this salon")
+    basis = (body.salary_proration_basis or "").strip()
+    if basis not in VALID_PRORATION_BASIS:
+        raise HTTPException(status_code=400, detail="salary_proration_basis must be calendar_days or working_days")
+    await db.salons.update_one({"id": salon_id}, {"$set": {"salary_proration_basis": basis}})
+    return {"ok": True, "salary_proration_basis": basis}
+
 
 
 # ============ WS2 — Indian States/UTs + Salon delivery address book ============
@@ -8188,6 +8243,14 @@ async def get_salon_customers(salon_id: str, branch_id: Optional[str] = None, cu
     # Group by phone to get unique customers + track last visit date
     customers_map = {}
     last_visit_by_phone: Dict[str, str] = {}
+    # Perf: batch-fetch all referenced user accounts in ONE query instead of a
+    # per-customer find_one inside the loop (removes an N+1 that scaled with the
+    # number of unique guests and was a real dashboard-slowness source).
+    user_ids = list({t.get('user_id') for t in tokens if t.get('user_id')})
+    users_by_id: Dict[str, dict] = {}
+    if user_ids:
+        async for u in db.users.find({"id": {"$in": user_ids}}, {"_id": 0}):
+            users_by_id[u.get('id')] = u
     for token in tokens:
         phone = token.get('phone')
         if not phone:
@@ -8198,9 +8261,7 @@ async def get_salon_customers(salon_id: str, branch_id: Optional[str] = None, cu
             if visit_dt > prev:
                 last_visit_by_phone[phone] = visit_dt
         if phone not in customers_map:
-            user_data = None
-            if token.get('user_id'):
-                user_data = await db.users.find_one({"id": token['user_id']}, {"_id": 0})
+            user_data = users_by_id.get(token.get('user_id')) if token.get('user_id') else None
             customers_map[phone] = {
                 "phone": phone,
                 "name": token.get('customer_name'),
@@ -8478,6 +8539,13 @@ async def update_salon_customer(
     if new_dob is not None:
         updates["date_of_birth"] = new_dob
 
+    # Section 1.1 — grouped editable fields. Only set keys the client actually
+    # sent (presence-based, so blanks can clear a value intentionally).
+    for _k in ("email", "address", "city", "pincode", "anniversary", "tag",
+               "preferred_barber_id", "source", "instagram_id", "facebook_id"):
+        if _k in body:
+            updates[_k] = body.get(_k)
+
     # If phone is being changed, validate no collision
     phone_changed = bool(new_phone) and new_phone != lookup_phone
     if phone_changed:
@@ -8540,6 +8608,102 @@ async def update_salon_customer(
             "date_of_birth": new_dob if new_dob is not None else (existing.get("date_of_birth") if existing else None),
         },
     }
+
+
+# ============ Section 1.2 — Block online booking toggle ============
+def _norm10(p: str) -> str:
+    """Normalise a phone to its 10-digit local form."""
+    d = "".join(ch for ch in (p or "") if ch.isdigit())
+    if len(d) == 12 and d.startswith("91"):
+        d = d[2:]
+    if len(d) == 11 and d.startswith("0"):
+        d = d[1:]
+    return d[-10:] if len(d) >= 10 else d
+
+
+def _phone_variants(phone: str) -> list:
+    """All stored forms a salon_customers.phone might take for one guest."""
+    p10 = _norm10(phone)
+    variants = {phone, p10, f"+91{p10}", f"91{p10}"}
+    return [v for v in variants if v]
+
+
+@api_router.put("/salons/{salon_id}/customers/{phone}/online-booking")
+async def set_online_booking(salon_id: str, phone: str, blocked: bool,
+                             current_user=Depends(get_current_salon_user)):
+    """Toggle whether this guest may self-book online. When blocked, only the
+    salon can create bookings for them (Section 1.2)."""
+    res = await db.salon_customers.update_one(
+        {"salon_id": salon_id, "phone": {"$in": _phone_variants(phone)}},
+        {"$set": {"online_booking_blocked": bool(blocked),
+                  "updated_at": datetime.now(timezone.utc).isoformat()}})
+    if res.matched_count == 0:
+        # Upsert a thin master row so the flag sticks even for token-only guests.
+        lookup = phone if phone.startswith("+91") else f"+91{_norm10(phone)}"
+        await db.salon_customers.insert_one({
+            "id": str(uuid.uuid4()),
+            "salon_id": salon_id,
+            "branch_id": await resolve_branch_id(salon_id, None),
+            "name": "Customer",
+            "phone": lookup,
+            "online_booking_blocked": bool(blocked),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "source": "edited",
+        })
+    return {"ok": True, "online_booking_blocked": bool(blocked)}
+
+
+# ============ Section 1.3 — Family members CRUD (stored on customer doc) ============
+class FamilyMember(BaseModel):
+    name: str
+    phone: str          # store normalized 10-digit
+    relation: str       # Spouse/Son/Daughter/Father/Mother/Sibling/Other
+
+
+@api_router.get("/salons/{salon_id}/customers/{phone}/family")
+async def get_family(salon_id: str, phone: str, current_user=Depends(get_current_salon_user)):
+    c = await db.salon_customers.find_one(
+        {"salon_id": salon_id, "phone": {"$in": _phone_variants(phone)}},
+        {"_id": 0, "family_members": 1})
+    return {"members": (c or {}).get("family_members", [])}
+
+
+@api_router.post("/salons/{salon_id}/customers/{phone}/family")
+async def add_family(salon_id: str, phone: str, m: FamilyMember,
+                     current_user=Depends(get_current_salon_user)):
+    member = {"name": m.name.strip(), "phone": _norm10(m.phone), "relation": m.relation}
+    if len(member["phone"]) != 10:
+        raise HTTPException(400, "Enter a valid 10-digit mobile.")
+    res = await db.salon_customers.update_one(
+        {"salon_id": salon_id, "phone": {"$in": _phone_variants(phone)}},
+        {"$push": {"family_members": member},
+         "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}})
+    if res.matched_count == 0:
+        lookup = phone if phone.startswith("+91") else f"+91{_norm10(phone)}"
+        await db.salon_customers.insert_one({
+            "id": str(uuid.uuid4()),
+            "salon_id": salon_id,
+            "branch_id": await resolve_branch_id(salon_id, None),
+            "name": "Customer",
+            "phone": lookup,
+            "family_members": [member],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "source": "edited",
+        })
+    return {"ok": True, "member": member}
+
+
+@api_router.delete("/salons/{salon_id}/customers/{phone}/family/{member_phone}")
+async def remove_family(salon_id: str, phone: str, member_phone: str,
+                        current_user=Depends(get_current_salon_user)):
+    await db.salon_customers.update_one(
+        {"salon_id": salon_id, "phone": {"$in": _phone_variants(phone)}},
+        {"$pull": {"family_members": {"phone": _norm10(member_phone)}},
+         "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}})
+    return {"ok": True}
+
 
 
 @api_router.delete("/salons/{salon_id}/customers/{phone}")
@@ -10133,6 +10297,10 @@ class MembershipPlanCreate(BaseModel):
     color: Optional[str] = None  # hex color override, optional
     plan_type: Optional[str] = "credit"  # "credit" (wallet top-up) | "discount" (flat % off every booking)
     discount_percent: Optional[float] = 0  # flat % off services, used when plan_type == "discount"
+    # Section 1.4 — family membership. When is_family, the buyer must have
+    # family members listed and only listed members can avail benefits.
+    is_family: Optional[bool] = False
+    family_size: Optional[int] = 4
 
 class MembershipPlan(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -10147,6 +10315,8 @@ class MembershipPlan(BaseModel):
     color: Optional[str] = None
     plan_type: Optional[str] = "credit"
     discount_percent: Optional[float] = 0
+    is_family: Optional[bool] = False
+    family_size: Optional[int] = 4
     is_active: bool = True
     created_at: str
 
@@ -10461,6 +10631,31 @@ async def delete_membership_plan(
     
     return {"message": "Membership plan deleted successfully"}
 
+@api_router.get("/salons/{salon_id}/memberships/{membership_id}/covers/{phone}")
+async def check_family_membership_coverage(salon_id: str, membership_id: str, phone: str,
+                                           current_user=Depends(get_current_salon_user)):
+    """Section 1.4 — is this visiting person covered by the (family) membership?
+    Non-family memberships cover only the owner. Family memberships cover the
+    frozen `covered_phones` set captured at sale time.
+    """
+    m = await db.customer_memberships.find_one(
+        {"id": membership_id, "salon_id": salon_id},
+        {"_id": 0, "covered_phones": 1, "customer_phone": 1, "is_family": 1})
+    if not m:
+        raise HTTPException(status_code=404, detail="Membership not found")
+    visitor = _norm10(phone)
+    if m.get("is_family") and m.get("covered_phones"):
+        covered = visitor in [_norm10(p) for p in m.get("covered_phones", [])]
+    else:
+        covered = visitor == _norm10(m.get("customer_phone") or "")
+    return {
+        "covered": covered,
+        "covered_phones": m.get("covered_phones") or [],
+        "detail": None if covered else "This member isn't covered by the family membership.",
+    }
+
+
+
 @api_router.post("/salons/{salon_id}/sell-membership")
 async def sell_membership(salon_id: str, membership: CustomerMembershipCreate, current_user=Depends(get_current_salon_user)):
     """Sell membership to a customer"""
@@ -10473,7 +10668,24 @@ async def sell_membership(salon_id: str, membership: CustomerMembershipCreate, c
     phone = membership.customer_phone
     if not phone.startswith("+91"):
         phone = f"+91{phone}"
-    
+
+    # Section 1.4 — family membership eligibility. The buyer must have family
+    # members listed; the covered set is frozen at sale time (main customer +
+    # up to family_size-1 listed members).
+    covered_phones = None
+    if plan.get("is_family"):
+        cust = await db.salon_customers.find_one(
+            {"salon_id": salon_id, "phone": {"$in": _phone_variants(phone)}},
+            {"_id": 0, "family_members": 1}) or {}
+        fam = cust.get("family_members") or []
+        if len(fam) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Add family members to this profile before selling a family membership.")
+        fam_size = int(plan.get("family_size") or 4)
+        covered_phones = [_norm10(phone)] + [
+            _norm10(fm.get("phone")) for fm in fam][: max(0, fam_size - 1)]
+
     # Calculate expiry date
     expiry_date = datetime.now(timezone.utc) + timedelta(days=plan["validity_months"] * 30)
     
@@ -10487,9 +10699,7 @@ async def sell_membership(salon_id: str, membership: CustomerMembershipCreate, c
     if existing:
         # Add credit to existing wallet
         new_balance = existing["wallet_balance"] + plan["credit"]
-        await db.customer_memberships.update_one(
-            {"id": existing["id"]},
-            {"$set": {
+        _renew_set = {
                 "wallet_balance": new_balance,
                 "expiry_date": expiry_date.isoformat(),
                 "tier": plan.get("tier", existing.get("tier", "Custom")),
@@ -10497,7 +10707,13 @@ async def sell_membership(salon_id: str, membership: CustomerMembershipCreate, c
                 # Reset expiry-warning flags on renewal
                 "notified_1m_expiry": False,
                 "notified_1w_expiry": False,
-            }}
+        }
+        if covered_phones is not None:
+            _renew_set["covered_phones"] = covered_phones
+            _renew_set["is_family"] = True
+        await db.customer_memberships.update_one(
+            {"id": existing["id"]},
+            {"$set": _renew_set}
         )
         
         # Record transaction
@@ -10536,6 +10752,9 @@ async def sell_membership(salon_id: str, membership: CustomerMembershipCreate, c
             "payment_confirmed": True,  # Salon-side sells are auto-confirmed
             "purchased_at": datetime.now(timezone.utc).isoformat()
         }
+        if covered_phones is not None:
+            membership_data["covered_phones"] = covered_phones
+            membership_data["is_family"] = True
         
         await db.customer_memberships.insert_one(membership_data)
         # FastAPI can't serialize ObjectId; strip it after insert.
@@ -11316,8 +11535,21 @@ async def create_booking(booking: BookingCreate):
     phone = booking.phone
     if not phone.startswith("+91"):
         phone = f"+91{phone}"
+
+    # Section 1.2 — enforce "block online booking" ONLY on the customer-facing
+    # path. If the salon has disabled online booking for this guest, the guest
+    # cannot self-book (the salon can still book for them via /salon-booking).
+    _digits = "".join(ch for ch in phone if ch.isdigit())
+    _p10 = _digits[-10:] if len(_digits) >= 10 else _digits
+    _blocked_doc = await db.salon_customers.find_one(
+        {"salon_id": booking.salon_id,
+         "phone": {"$in": [phone, _p10, f"+91{_p10}"]}},
+        {"_id": 0, "online_booking_blocked": 1})
+    if _blocked_doc and _blocked_doc.get("online_booking_blocked"):
+        raise HTTPException(
+            status_code=403,
+            detail="Online booking is disabled for this account. Please contact the salon to book.")
     
-    # Handle guest booking - create or update customer account
     customer = await db.customers.find_one({"phone": phone})
     if not customer:
         # Create new customer account (unverified for guests)
@@ -11852,7 +12084,7 @@ async def call_next_token(salon_id: str, barber_id: str, current_salon=Depends(g
             )
         
         # Check and notify tokens that are near (3, 2, 1 away)
-        await check_and_notify_nearby_tokens(salon_id, barber_id, date, next_token["token_number"])
+        asyncio.create_task(check_and_notify_nearby_tokens(salon_id, barber_id, date, next_token["token_number"]))
         
         return updated
     
@@ -11943,7 +12175,7 @@ async def complete_token(token_id: str, current_salon=Depends(get_current_salon)
         date_n = token.get("date")
         tok_num_n = token.get("token_number")
         if salon_id_n and barber_id_n and date_n and tok_num_n:
-            await check_and_notify_nearby_tokens(salon_id_n, barber_id_n, date_n, str(tok_num_n))
+            asyncio.create_task(check_and_notify_nearby_tokens(salon_id_n, barber_id_n, date_n, str(tok_num_n)))
     except Exception as _e:
         logger.warning(f"nearby-alert skipped on /complete: {_e}")
 
@@ -12150,7 +12382,7 @@ async def call_token(token_id: str, current_salon=Depends(get_current_salon_user
         date = token.get("date")
         tok_num = token.get("token_number")
         if salon_id and barber_id and date and tok_num:
-            await check_and_notify_nearby_tokens(salon_id, barber_id, date, str(tok_num))
+            asyncio.create_task(check_and_notify_nearby_tokens(salon_id, barber_id, date, str(tok_num)))
     except Exception as _e:
         logger.warning(f"nearby-alert skipped on /call: {_e}")
 
@@ -15091,6 +15323,12 @@ async def get_customer_profile(
         "facebook_id": master.get("facebook_id"),
         "preferred_barber_id": master.get("preferred_barber_id"),
         "source": master.get("source"),
+        "address": master.get("address"),
+        "city": master.get("city"),
+        "pincode": master.get("pincode"),
+        "tag": master.get("tag"),
+        "online_booking_blocked": bool(master.get("online_booking_blocked")),
+        "family_members": master.get("family_members") or [],
         "last_visit": last_visit_iso,
         "last_barber_id": last_barber_id,
         "last_barber_name": last_barber_name,
@@ -17422,6 +17660,85 @@ async def clear_attendance_override(
     }
 
 
+# ============ Section 2 — Quick attendance marking (bulk + single row) ============
+def _today_ist() -> str:
+    return datetime.now(_IST).strftime("%Y-%m-%d")
+
+
+VALID_ATTN_STATUS = {"present", "absent", "half_day", "holiday", "on_leave"}
+
+
+class AttnRow(BaseModel):
+    barber_id: str
+    status: Optional[str] = None       # for service_completion mode
+    check_in: Optional[str] = None     # "HH:MM" for geo_checkin mode
+    check_out: Optional[str] = None
+
+
+class AttnMarkIn(BaseModel):
+    date: Optional[str] = None         # defaults to today IST
+    rows: List[AttnRow]
+
+
+@api_router.post("/salons/{salon_id}/attendance/mark")
+async def mark_attendance(salon_id: str, body: AttnMarkIn,
+                          current_user=Depends(get_current_salon_user)):
+    """Section 2 — one-tap quick attendance for a single day.
+
+    Row layout depends on the salon's attendance_mode:
+      • service_completion → each row carries a `status` (present/absent/half_day/
+        holiday/on_leave).
+      • geo_checkin        → each row carries check_in / check_out (HH:MM); an
+        optional status override (absent/holiday/on_leave) is still honoured.
+    Writes to db.attendance so the salary screen (Section 3) reflects it.
+    """
+    if current_user.get("role") not in ["admin", "salon_admin", "salon"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    date = body.date or _today_ist()
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    salon = await db.salons.find_one({"id": salon_id}, {"_id": 0, "attendance_mode": 1})
+    mode = (salon or {}).get("attendance_mode") or "service_completion"
+    now = datetime.now(timezone.utc).isoformat()
+
+    count = 0
+    for r in body.rows:
+        record_id = f"{salon_id}_{r.barber_id}_{date}"
+        doc = {
+            "id": record_id,
+            "salon_id": salon_id,
+            "barber_id": r.barber_id,
+            "date": date,
+            "marked_by": "salon",
+            "auto_calculated": False,
+            "override_by": current_user.get("id"),
+            "updated_at": now,
+            "attendance_mode": mode,
+        }
+        if mode == "geo_checkin":
+            doc["check_in_at"] = r.check_in
+            doc["check_out_at"] = r.check_out
+            if r.status in VALID_ATTN_STATUS:   # allow A/Holiday/Leave overrides
+                doc["status"] = r.status
+        else:
+            if r.status not in VALID_ATTN_STATUS:
+                continue
+            doc["status"] = r.status
+        await db.attendance.update_one(
+            {"id": record_id},
+            {"$set": doc, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+        count += 1
+
+    return {"ok": True, "date": date, "mode": mode, "count": count}
+
+
+
 @api_router.post("/salons/{salon_id}/staff-attendance/mark-all-present/{date}")
 async def mark_all_present(
     salon_id: str,
@@ -17925,24 +18242,28 @@ async def get_monthly_salary(
             else:
                 unpaid_leave_days += qty
 
-        # ---- Salary math (prorated to actual attendance) ----
+        # ---- Salary math (prorated to actual attendance, basis-driven) ----
+        # Section 3: the proration divisor is a salon setting.
+        #   calendar_days (default): base ÷ total days in month; weekly-offs &
+        #     public holidays are PAID (added to earned_days as paid_offs).
+        #   working_days: base ÷ (days − offs − holidays); offs already excluded.
+        basis = salon.get("salary_proration_basis") or "calendar_days"
         base_compensation = _barber_base_salary(barber)
-        per_day_rate = base_compensation / working_days_in_month if working_days_in_month > 0 else 0
+
+        if basis == "working_days":
+            divisor = working_days_in_month                 # excl. offs & holidays
+            paid_offs = 0                                    # already excluded
+        else:  # calendar_days (default)
+            divisor = num_days                               # 28/30/31
+            paid_offs = weekly_off_count + public_holiday_count_in_month  # paid
+
+        per_day_rate = base_compensation / divisor if divisor > 0 else 0
         lop_deduction = round(per_day_rate * unpaid_leave_days, 2)  # informational
 
-        # Days the staff "earned" pay for. Policy:
-        #   present_days + half_days * 0.5 + paid_leave_days
-        # (weekly offs and holidays are excluded from working_days_in_month, so
-        #  per_day_rate already accounts for them being paid implicitly.)
-        earned_days = max(0.0, present_days + (half_days * 0.5) + paid_leave_days)
+        # Days the staff "earned" pay for. A perfect-attendance month always
+        # pays full base regardless of basis.
+        earned_days = max(0.0, present_days + (half_days * 0.5) + paid_leave_days + paid_offs)
         earned_salary = round(per_day_rate * earned_days, 2)
-
-        # Legacy "calculated_salary" — keep computing the way it used to so
-        # existing readers don't regress.  Effective working days = present + 0.5*half.
-        # We use num_days as the daily-rate divisor (old behaviour).
-        old_daily_rate = base_compensation / num_days if num_days > 0 else 0
-        effective_days = present_days + (half_days * 0.5)
-        calculated_salary = round(old_daily_rate * effective_days, 2)
 
         # Incentive (existing).
         incentive = await db.incentive_payouts.find_one({
@@ -17954,12 +18275,11 @@ async def get_monthly_salary(
         incentive_amount = float(incentive.get("incentive_earned", 0)) if incentive else 0.0
 
         # ---- Canonical total: prorated earnings + incentive ----
-        # Previously this was `base − lop_deduction` which only deducted unpaid
-        # leave; absent days were silently paid. Now it scales linearly with
-        # earned_days so 10 present days in a 26-working-day month pays
-        # base × 10/26 + incentive.
+        # Section 3: collapse the legacy `calculated_salary` field onto the
+        # correct `final_payable` so every reader shows the same number.
         final_payable = round(earned_salary + incentive_amount, 2)
         total_payable = final_payable  # keep total_payable in lock-step with final_payable
+        calculated_salary = final_payable  # legacy field now mirrors the correct value
 
         attendance_mode_snapshot = salon.get("attendance_mode") or "service_completion"
 
@@ -17986,6 +18306,19 @@ async def get_monthly_salary(
             "incentive_amount": incentive_amount,
             "final_payable": final_payable,
             "total_payable": total_payable,
+            # Section 3 — expose the basis + the maths so the UI can explain
+            # exactly how attendance drove the figure.
+            "salary_proration_basis": basis,
+            "proration_divisor": divisor,
+            "per_day_rate": round(per_day_rate, 2),
+            "earned_days": round(earned_days, 2),
+            "paid_offs": paid_offs,
+            "earned_salary": earned_salary,
+            "pay_formula": (
+                f"₹{round(base_compensation)} × {round(earned_days, 2)}/{divisor} "
+                f"= ₹{earned_salary}"
+                + (f" + ₹{round(incentive_amount)} incentive = ₹{final_payable}" if incentive_amount else "")
+            ),
             "attendance_mode_snapshot": attendance_mode_snapshot,
             "is_paid": False,
             "updated_at": now,
@@ -18046,7 +18379,7 @@ async def mark_salary_paid(
         "amount": salary_record["total_payable"],
         "payment_method": body.payment_method,
         "description": f"Salary payment for {barber_name} - {month}",
-        "narration": f"Monthly salary paid to {barber_name} for {month}. Base: ₹{salary_record['calculated_salary']}, Incentive: ₹{salary_record['incentive_amount']}",
+        "narration": f"Monthly salary paid to {barber_name} for {month}. {salary_record.get('pay_formula') or ('Base: ₹' + str(salary_record.get('base_compensation') or salary_record.get('calculated_salary')))}. Total paid: ₹{salary_record['total_payable']}",
         "linked_salary_id": salary_id,
         "barber_id": barber_id,
         "barber_name": barber_name,
@@ -19927,6 +20260,7 @@ async def startup_event():
             db.barbers.create_index([("salon_id", 1), ("is_active", 1)], background=True),
             db.barbers.create_index("id", background=True),
             db.attendance.create_index([("salon_id", 1), ("date", -1)], background=True),
+            db.attendance.create_index([("salon_id", 1), ("barber_id", 1), ("date", -1)], background=True),
             db.attendance.create_index([("staff_id", 1), ("date", -1)], background=True),
             db.financial_transactions.create_index([("salon_id", 1), ("date", -1)], background=True),
             db.invoices.create_index([("salon_id", 1), ("date", -1)], background=True),

@@ -117,6 +117,52 @@ const QV2_CSS = `
 .qv2 .qv2-actbtn.dial:hover{background:linear-gradient(135deg,#2FA96A,#3EBD7D);color:#fff}
 .qv2 .qv2-noact{font-size:11px;color:#9A9EAE;font-style:italic;font-weight:600}
 
+/* ---- Compact one-line list (Section 4) ---- */
+.qv2 .qv2-lines{background:#fff;border:1px solid #ECECF3;border-radius:14px;overflow:hidden;box-shadow:0 3px 12px rgba(30,32,50,.03)}
+.qv2 .qv2-lhead,.qv2 .qv2-line{display:grid;grid-template-columns:54px 1.5fr 1.3fr 1fr 96px 84px 150px;gap:10px;align-items:center;padding:10px 14px}
+.qv2 .qv2-lhead{background:#FAFAFD;border-bottom:1px solid #ECECF3;font-size:10.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:#9298AA}
+.qv2 .qv2-line{border-bottom:1px solid #F2F2F7;cursor:pointer;transition:.12s;border-left:3px solid transparent}
+.qv2 .qv2-line:last-child{border-bottom:none}
+.qv2 .qv2-line:hover{background:#FAF8FF}
+.qv2 .qv2-line.st-waiting{border-left-color:#F0AD4E}
+.qv2 .qv2-line.st-called{border-left-color:#4A9BFA}
+.qv2 .qv2-line.st-completed{border-left-color:#2FA96A}
+.qv2 .qv2-line.st-skipped{border-left-color:#E45C86}
+.qv2 .qv2-line.st-cancelled{border-left-color:#C3C6D3;opacity:.72}
+.qv2 .qv2-line .tk{font-weight:900;color:#6C4FE0;font-size:14px}
+.qv2 .qv2-line .nm{font-weight:800;color:#23252F;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qv2 .qv2-line .sub{font-size:11px;color:#7C8092;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qv2 .qv2-line .money{font-weight:800;color:#23252F;font-size:13px;text-align:right}
+.qv2 .qv2-line.st-cancelled .nm{text-decoration:line-through}
+.qv2 .qv2-lact{display:flex;gap:4px;justify-content:flex-end}
+.qv2 .qv2-lact button{border:1px solid #ECECF3;background:#fff;border-radius:8px;padding:5px 8px;font-size:11px;font-weight:800;cursor:pointer;color:#5A5E70;transition:.12s;font-family:inherit}
+.qv2 .qv2-lact button:hover{border-color:#DDDFE9;background:#F6F6FA}
+.qv2 .qv2-lact button.call{background:#4A9BFA;color:#fff;border-color:transparent}
+.qv2 .qv2-lact button.complete{background:#2FA96A;color:#fff;border-color:transparent}
+.qv2 .qv2-lact button.cancel{color:#E45C86}
+.qv2 .qv2-lact button.rebook{background:#F1EEFF;color:#6C4FE0;border-color:#E7E2FF}
+@media (max-width:820px){
+  .qv2 .qv2-lhead{display:none}
+  .qv2 .qv2-line{grid-template-columns:44px 1fr auto;grid-template-rows:auto auto;row-gap:4px}
+  .qv2 .qv2-line .l-staff,.qv2 .qv2-line .l-svc{grid-column:2}
+}
+
+/* ---- Detail drawer ---- */
+.qv2 .qvd-ov{position:fixed;inset:0;background:rgba(20,20,40,.35);z-index:9070;opacity:0;pointer-events:none;transition:.2s}
+.qv2 .qvd-ov.open{opacity:1;pointer-events:auto}
+.qv2 .qvd{position:fixed;top:0;right:0;height:100vh;width:420px;max-width:94vw;background:#fff;z-index:9072;box-shadow:-8px 0 30px rgba(20,20,40,.14);transform:translateX(100%);transition:.24s cubic-bezier(.4,0,.2,1);display:flex;flex-direction:column}
+.qv2 .qvd.open{transform:translateX(0)}
+.qv2 .qvd h3{margin:0;font-size:16px;font-weight:900;color:#23252F}
+.qv2 .qvd .qvd-h{display:flex;align-items:flex-start;justify-content:space-between;padding:18px 20px;border-bottom:1px solid #F0F0F5}
+.qv2 .qvd .qvd-b{padding:18px 20px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:14px}
+.qv2 .qvd .qvd-sec{border:1px solid #EEF0F6;border-radius:12px;padding:12px 14px}
+.qv2 .qvd .qvd-sec .t{font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:#6C4FE0;margin-bottom:8px}
+.qv2 .qvd .qvd-kv{display:flex;justify-content:space-between;font-size:12.5px;padding:3px 0}
+.qv2 .qvd .qvd-kv .k{color:#8A8EA0;font-weight:600}
+.qv2 .qvd .qvd-kv .v{color:#23252F;font-weight:700;text-align:right}
+.qv2 .qvd .qvd-f{padding:14px 20px;border-top:1px solid #F0F0F5;display:flex;gap:8px;flex-wrap:wrap}
+.qv2 .qvd .qvd-f button{flex:1;min-width:110px;border:none;border-radius:10px;padding:10px 12px;font-weight:800;font-size:12.5px;cursor:pointer;font-family:inherit}
+
 .qv2 .qv2-empty{text-align:center;padding:70px 20px;background:#fff;border:2px dashed #ECECF3;border-radius:16px}
 .qv2 .qv2-empty svg{width:56px;height:56px;color:#C3C6D3;stroke:currentColor;stroke-width:1.6;fill:none;margin-bottom:14px}
 .qv2 .qv2-empty h4{font-size:15.5px;font-weight:800;color:#23252F;margin:0 0 6px}
@@ -158,7 +204,11 @@ export default function QueueTabV2({
   handleSkipToken, handleCancelToken, handleSendNotification, handleOpenAddServices,
   API, navigate, salonId, getAuthHeaders,
 }) {
-  const [view, setView] = useState('list'); // 'list' | 'calendar'
+  const [view, setView] = useState(() => {
+    try { return localStorage.getItem('qv2_view') || 'list'; } catch (_) { return 'list'; }
+  }); // 'list' (cards) | 'compact' (one-line) | 'calendar'
+  const [detail, setDetail] = useState(null); // token shown in the detail drawer
+  const changeView = (v) => { setView(v); try { localStorage.setItem('qv2_view', v); } catch (_) { /* ignore */ } };
   useEffect(() => {
     const id = 'qv2-styles';
     if (document.getElementById(id)) return;
@@ -188,17 +238,18 @@ export default function QueueTabV2({
       <div className="qv2-topbar">
         <div style={{ display: 'inline-flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <div className="qv2-dates qv2-viewtoggle">
-            <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>List</button>
-            <button className={view === 'calendar' ? 'on' : ''} onClick={() => setView('calendar')}>Calendar</button>
+            <button className={view === 'list' ? 'on' : ''} onClick={() => changeView('list')}>Cards</button>
+            <button className={view === 'compact' ? 'on' : ''} onClick={() => changeView('compact')}>List</button>
+            <button className={view === 'calendar' ? 'on' : ''} onClick={() => changeView('calendar')}>Calendar</button>
           </div>
-          {view === 'list' && (
+          {view !== 'calendar' && (
             <div className="qv2-dates">
               <button className={dateMode === 'today' ? 'on' : ''} onClick={() => setDateMode('today')}>Today</button>
               <button className={dateMode === 'yesterday' ? 'on' : ''} onClick={() => setDateMode('yesterday')}>Yesterday</button>
               <button className={dateMode === 'range' ? 'on' : ''} onClick={() => setDateMode('range')}>Range</button>
             </div>
           )}
-          {view === 'list' && dateMode === 'range' && (
+          {view !== 'calendar' && dateMode === 'range' && (
             <div className="qv2-daterange">
               <input type="date" value={dateFrom || ''} onChange={e => setDateFrom(e.target.value)} />
               <span>→</span>
@@ -206,7 +257,7 @@ export default function QueueTabV2({
             </div>
           )}
         </div>
-        {view === 'list' && (
+        {view !== 'calendar' && (
           <div className="qv2-viewinfo">
             Viewing bookings for <b>{dateMode === 'range'
               ? `${dateFrom || '—'} → ${dateTo || '—'}`
@@ -227,6 +278,75 @@ export default function QueueTabV2({
           handleSendNotification={handleSendNotification}
         />
       )}
+
+      {view === 'compact' && (() => {
+        const svcSummary = (t) => {
+          const arr = t.selected_services || t.services || [];
+          if (Array.isArray(arr) && arr.length) {
+            const names = arr
+              .map(s => (typeof s === 'string' ? '' : (s.name || s.service_name || '')))
+              .filter(Boolean);
+            if (names.length) return names.length > 2 ? `${names.slice(0, 2).join(', ')} +${names.length - 2}` : names.join(', ');
+          }
+          const n = t.services_count || (Array.isArray(arr) ? arr.length : 0);
+          return n ? `${n} service${n > 1 ? 's' : ''}` : '—';
+        };
+        const timeOf = (t) => t.created_at
+          ? new Date(t.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+          : (t.shift || t.time_slot || '—');
+        return (
+          <div className="qv2-lines">
+            {tokens.length === 0 && (
+              <div className="qv2-empty" style={{ border: 'none', boxShadow: 'none' }}>
+                <I.clock /><h4>No bookings {filter !== 'all' ? `(${STATUS_LABEL[filter] || filter})` : 'yet'}</h4>
+                <p>New bookings will show up here in real-time.</p>
+              </div>
+            )}
+            {tokens.length > 0 && (
+              <div className="qv2-lhead">
+                <div>Token</div><div>Customer</div><div>Service</div><div>Staff</div><div>Status</div><div style={{ textAlign: 'right' }}>Amount</div><div style={{ textAlign: 'right' }}>Actions</div>
+              </div>
+            )}
+            {tokens.map(t => {
+              const st = t.status || 'waiting';
+              return (
+                <div key={t.id} className={`qv2-line st-${st}`} onClick={() => setDetail(t)} data-testid={`queue-line-${t.id}`}>
+                  <div className="tk">{t.token_number || '—'}</div>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="nm">{t.customer_name || 'Unknown'}</div>
+                    <div className="sub">{t.phone || '—'} · {timeOf(t)}</div>
+                  </div>
+                  <div className="sub l-svc" title={svcSummary(t)}>{svcSummary(t)}</div>
+                  <div className="sub l-staff">{t.barber_name || 'Unassigned'}</div>
+                  <div><span className={`qv2-statuspill ${st}`}>{STATUS_LABEL[st] || st}</span></div>
+                  <div className="money">₹{Number(t.total_amount || 0).toLocaleString('en-IN')}</div>
+                  <div className="qv2-lact" onClick={e => e.stopPropagation()}>
+                    {st === 'waiting' && <>
+                      <button className="call" onClick={() => handleCallToken(t.id)} title="Call / check-in">Call</button>
+                      <button onClick={() => handleOpenAddServices(t)} title="Modify / reschedule">Edit</button>
+                      <button className="cancel" onClick={() => handleCancelToken(t.id)} title="Cancel">✕</button>
+                    </>}
+                    {st === 'called' && <>
+                      <button className="complete" onClick={() => handleCompleteToken(t.id)} title="Complete">Done</button>
+                      <button onClick={() => handleOpenAddServices(t)} title="Add service">Edit</button>
+                    </>}
+                    {st === 'skipped' && <>
+                      <button onClick={() => handleRecallToken(t.id)} title="Recall">Recall</button>
+                      <button className="cancel" onClick={() => handleCancelToken(t.id)} title="Cancel">✕</button>
+                    </>}
+                    {st === 'completed' && (t.invoice_id
+                      ? <button className="rebook" onClick={() => window.open(`${API}/invoices/${t.invoice_id}/view`, '_blank')} title="Invoice">Invoice</button>
+                      : <span className="qv2-noact">Done</span>)}
+                    {st === 'cancelled' && (
+                      <button className="rebook" onClick={() => { try { window.dispatchEvent(new CustomEvent('salon:open-new-appointment', { detail: { rebook: t } })); } catch (_) { /* ignore */ } }} title="Rebook">Rebook</button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {view === 'list' && (<React.Fragment>
       {/* -------- Primary actions: Call Next + Add Booking -------- */}
@@ -415,6 +535,57 @@ export default function QueueTabV2({
         })}
       </div>
       </React.Fragment>)}
+
+      {/* -------- Detail drawer (Section 4) -------- */}
+      <div className={`qvd-ov ${detail ? 'open' : ''}`} onClick={() => setDetail(null)} />
+      <aside className={`qvd ${detail ? 'open' : ''}`}>
+        {detail && (() => {
+          const t = detail; const st = t.status || 'waiting';
+          const svc = t.selected_services || t.services || [];
+          const svcNames = Array.isArray(svc) ? svc.map(s => (typeof s === 'string' ? '' : (s.name || s.service_name || ''))).filter(Boolean) : [];
+          const kv = (k, v) => (<div className="qvd-kv"><span className="k">{k}</span><span className="v">{v || '—'}</span></div>);
+          return (
+            <>
+              <div className="qvd-h">
+                <div>
+                  <h3>{t.customer_name || 'Unknown'}</h3>
+                  <div style={{ fontSize: 12, color: '#7C8092', fontWeight: 600, marginTop: 4 }}>Token #{t.token_number} · <span className={`qv2-statuspill ${st}`} style={{ verticalAlign: 'middle' }}>{STATUS_LABEL[st] || st}</span></div>
+                </div>
+                <button className="shv2-profile__close" onClick={() => setDetail(null)} aria-label="Close" style={{ background: '#F4F5F9', border: 'none', borderRadius: 8, width: 30, height: 30, cursor: 'pointer', fontSize: 16 }}>✕</button>
+              </div>
+              <div className="qvd-b">
+                <div className="qvd-sec">
+                  <div className="t">Customer</div>
+                  {kv('Name', t.customer_name)}
+                  {kv('Phone', t.phone && <a href={`tel:${t.phone}`} style={{ color: '#6C4FE0', textDecoration: 'none' }}>{t.phone}</a>)}
+                  {t.phone && kv('WhatsApp', <a href={`https://wa.me/91${String(t.phone).replace(/\D/g, '').slice(-10)}`} target="_blank" rel="noreferrer" style={{ color: '#0E9C82', textDecoration: 'none' }}>Open chat</a>)}
+                </div>
+                <div className="qvd-sec">
+                  <div className="t">Booking</div>
+                  {kv('Staff', t.barber_name || 'Unassigned')}
+                  {kv('Date', new Date(t.date).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' }))}
+                  {kv('Time', t.created_at ? new Date(t.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : (t.shift || t.time_slot || '—'))}
+                  {kv('Services', svcNames.length ? svcNames.join(', ') : (t.services_count ? `${t.services_count} service(s)` : '—'))}
+                </div>
+                <div className="qvd-sec">
+                  <div className="t">Payment</div>
+                  {kv('Total', `₹${Number(t.total_amount || 0).toLocaleString('en-IN')}`)}
+                  {kv('Status', t.payment_confirmed ? `Paid · ${(t.payment_mode || 'paid').toUpperCase()}` : 'Unpaid')}
+                  {t.recall_count > 0 && kv('Re-calls', `${t.recall_count}×`)}
+                </div>
+              </div>
+              <div className="qvd-f">
+                {st === 'waiting' && <button style={{ background: '#4A9BFA', color: '#fff' }} onClick={() => { handleCallToken(t.id); setDetail(null); }}>Call</button>}
+                {st === 'called' && <button style={{ background: '#2FA96A', color: '#fff' }} onClick={() => { handleCompleteToken(t.id); setDetail(null); }}>Complete</button>}
+                {(st === 'waiting' || st === 'called') && <button style={{ background: '#F1EEFF', color: '#6C4FE0' }} onClick={() => { handleOpenAddServices(t); setDetail(null); }}>Modify</button>}
+                {t.invoice_id && <button style={{ background: '#E4F6ED', color: '#1F8F52' }} onClick={() => window.open(`${API}/invoices/${t.invoice_id}/view`, '_blank')}>Invoice</button>}
+                {(st === 'completed' || st === 'cancelled' || st === 'skipped') && <button style={{ background: '#F1EEFF', color: '#6C4FE0' }} onClick={() => { try { window.dispatchEvent(new CustomEvent('salon:open-new-appointment', { detail: { rebook: t } })); } catch (_) { /* ignore */ } setDetail(null); }}>Rebook</button>}
+                {(st === 'waiting' || st === 'called' || st === 'skipped') && <button style={{ background: '#fff', color: '#E45C86', border: '1px solid #F5C0D0' }} onClick={() => { handleCancelToken(t.id); setDetail(null); }}>Cancel</button>}
+              </div>
+            </>
+          );
+        })()}
+      </aside>
     </div>
   );
 }
