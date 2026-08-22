@@ -438,6 +438,7 @@ class BarberUpdate(BaseModel):
     leave_dates: Optional[List[str]] = None
     compensation: Optional[float] = None
     documents: Optional[List[str]] = None
+    is_active: Optional[bool] = None  # activate / deactivate staff without deleting
 
 class Barber(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -6227,6 +6228,7 @@ async def get_salon_barbers(
     customer_view: bool = False,
     date: Optional[str] = None,
     branch_id: Optional[str] = None,
+    include_inactive: bool = False,
     current_user: Optional[dict] = Depends(get_current_salon_user_optional),
 ):
     """
@@ -6243,6 +6245,10 @@ async def get_salon_barbers(
         if not customer_view and current_user and is_branch_manager(current_user):
             branch_id = enforce_branch_for_manager(current_user, branch_id)
         query = {"salon_id": salon_id, "is_active": True}
+        if include_inactive and not customer_view and not available_only:
+            # Admin staff view — also return deactivated staff so they can be
+            # shown in an "Inactive" section and re-activated.
+            query.pop("is_active", None)
         if customer_view:
             # For customer view, include barbers where is_barber=True OR is_barber field doesn't exist (backward compatibility)
             query["$or"] = [{"is_barber": True}, {"is_barber": {"$exists": False}}]

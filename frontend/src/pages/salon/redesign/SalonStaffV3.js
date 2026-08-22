@@ -189,6 +189,9 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
   const [ribbonOpen, setRibbonOpen] = useState(false);
   const [ribbonStatus, setRibbonStatus] = useState({}); // { barber_id: 'present'|'absent'|... }
   const [ribbonBusy, setRibbonBusy] = useState(false);
+  const [ribbonTimes, setRibbonTimes] = useState({}); // { barber_id: {check_in, check_out} } for geo mode
+  const [showInactive, setShowInactive] = useState(false);
+  const [activeBusyId, setActiveBusyId] = useState(null);
   const [todayStatus, setTodayStatus] = useState({}); // reflected on list rows after save
   const [prorationBasis, setProrationBasis] = useState('calendar_days');
   useEffect(() => {
@@ -285,7 +288,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     setLoading(true);
     try {
       const [barbersRes, salonRes, servicesRes] = await Promise.all([
-        axios.get(`${API}/salons/${salonId}/barbers`, { headers: getAuthHeaders?.() || {} }),
+        axios.get(`${API}/salons/${salonId}/barbers?include_inactive=true`, { headers: getAuthHeaders?.() || {} }),
         axios.get(`${API}/salons/${salonId}`).catch(() => ({ data: {} })),
         axios.get(`${API}/salons/${salonId}/services/enabled`).catch(() => ({ data: [] })),
       ]);
@@ -1165,6 +1168,40 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
   };
 
   // ---------- Renderers ----------
+  const renderStaffRow = (s, inactive = false) => {
+    const on = s.id === selectedId;
+    return (
+      <div key={s.id} className={`sgroup ${on ? 'on' : ''}`} style={inactive ? { opacity: 0.72 } : {}}>
+        <div className="sc" onClick={() => { setSelectedId(s.id); setSection('profile'); }}>
+          <div className="av" style={{ background: colorFor(s.name) }}>{initial(s.name)}</div>
+          <div className="si">
+            <b>{s.name}{inactive && <span style={{ fontSize: 9.5, fontWeight: 800, color: '#B0455F', background: '#FCE4EC', borderRadius: 5, padding: '1px 6px', marginLeft: 6 }}>INACTIVE</span>}</b>
+            <span>{(s.category || 'Junior')} · {s.experience || 0} yr{s.experience === 1 ? '' : 's'}</span>
+          </div>
+          {!inactive && todayStatus[s.id] && ATT_META[todayStatus[s.id]] && (
+            <span title={`Today: ${ATT_META[todayStatus[s.id]].full}`}
+              style={{ fontSize: 10, fontWeight: 900, borderRadius: 6, padding: '2px 7px', marginRight: 4, background: ATT_META[todayStatus[s.id]].bg, color: ATT_META[todayStatus[s.id]].fg }}>
+              {ATT_META[todayStatus[s.id]].lb}
+            </span>
+          )}
+          <svg className="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        {on && (
+          <div className="subnav">
+            {SECTIONS.map((sec) => (
+              <button key={sec.key} type="button"
+                className={`subitem ${section === sec.key ? 'on' : ''}`}
+                onClick={(e) => { e.stopPropagation(); setSection(sec.key); }}>
+                <svg viewBox="0 0 24 24">{sec.ico}</svg>{sec.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+
   const renderStaffList = () => (
     <div className="pane-l">
       <div className="list-head">
@@ -1206,40 +1243,19 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
       <div className="staff-list">
         {loading && <div style={{ padding: 20, fontSize: 12, color: '#8A7F90' }}>Loading…</div>}
         {!loading && filtered.length === 0 && <div style={{ padding: 20, fontSize: 12, color: '#8A7F90' }}>No staff yet</div>}
-        {filtered.map((s) => {
-          const on = s.id === selectedId;
-          return (
-            <div key={s.id} className={`sgroup ${on ? 'on' : ''}`}>
-              <div className="sc" onClick={() => { setSelectedId(s.id); setSection('profile'); }}>
-                <div className="av" style={{ background: colorFor(s.name) }}>{initial(s.name)}</div>
-                <div className="si">
-                  <b>{s.name}</b>
-                  <span>{(s.category || 'Junior')} · {s.experience || 0} yr{s.experience === 1 ? '' : 's'}
-                    {baseSalaryOf(s.compensation) > 0 ? ` · ₹${baseSalaryOf(s.compensation).toLocaleString('en-IN')}/mo` : ''}
-                  </span>
-                </div>
-                {todayStatus[s.id] && ATT_META[todayStatus[s.id]] && (
-                  <span title={`Today: ${ATT_META[todayStatus[s.id]].full}`}
-                    style={{ fontSize: 10, fontWeight: 900, borderRadius: 6, padding: '2px 7px', marginRight: 4, background: ATT_META[todayStatus[s.id]].bg, color: ATT_META[todayStatus[s.id]].fg }}>
-                    {ATT_META[todayStatus[s.id]].lb}
-                  </span>
-                )}
-                <svg className="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-              </div>
-              {on && (
-                <div className="subnav">
-                  {SECTIONS.map((sec) => (
-                    <button key={sec.key} type="button"
-                      className={`subitem ${section === sec.key ? 'on' : ''}`}
-                      onClick={(e) => { e.stopPropagation(); setSection(sec.key); }}>
-                      <svg viewBox="0 0 24 24">{sec.ico}</svg>{sec.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {filtered.filter((s) => s.is_active !== false).map((s) => renderStaffRow(s))}
+
+        {filtered.filter((s) => s.is_active === false).length > 0 && (
+          <div style={{ borderTop: '1px solid #F0F0F5', marginTop: 6, paddingTop: 6 }}>
+            <button type="button" onClick={() => setShowInactive((v) => !v)} data-testid="inactive-toggle"
+              style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', border: 'none', background: 'transparent', cursor: 'pointer', padding: '8px 14px', fontSize: 11.5, fontWeight: 800, color: '#8A8EA0', textTransform: 'uppercase', letterSpacing: '.4px' }}>
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ transform: showInactive ? 'rotate(90deg)' : 'none', transition: '.15s' }}><polyline points="9 18 15 12 9 6"/></svg>
+              Inactive staff
+              <span style={{ fontSize: 10.5, fontWeight: 800, background: '#F1F2F6', color: '#7C8092', borderRadius: 10, padding: '1px 8px' }}>{filtered.filter((s) => s.is_active === false).length}</span>
+            </button>
+            {showInactive && filtered.filter((s) => s.is_active === false).map((s) => renderStaffRow(s, true))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1247,28 +1263,53 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
   const renderProfileBody = () => {
     const s = selected;
     const att = attendanceSummary[s.id] || { P: 0, A: 0, H: 0, HO: 0, L: 0 };
-    const currentBranchName = (branchesList.find((b) => (b.id || b.branch_id) === s.branch_id) || {}).name || s.branch_name || '';
     return (
       <>
         <div className="secttl">
           Personal information
-          {isAdmin && branchesList.length > 1 && (
-            <button className="btn-ghost" style={{ padding: '7px 12px', marginLeft: 'auto' }} onClick={openTransferDrawer} data-testid="staff-branch-switch">
-              <svg viewBox="0 0 24 24"><path d="M17 3l4 4-4 4"/><path d="M3 7h18"/><path d="M7 21l-4-4 4-4"/><path d="M21 17H3"/></svg>
-              {currentBranchName ? `Switch branch (${currentBranchName})` : 'Switch branch'}
-            </button>
-          )}
-          {canEdit && !editingProfile && (
-            <button className="btn-ghost" style={{ padding: '7px 12px' }} onClick={startEditProfile}>
-              <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>Edit
-            </button>
-          )}
-          {editingProfile && (
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn-ghost" style={{ padding: '7px 12px' }} onClick={() => setEditingProfile(false)}>Cancel</button>
-              <button className="btn-primary" style={{ padding: '7px 12px' }} onClick={saveProfile}>Save</button>
-            </div>
-          )}
+          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', alignItems: 'center', flexWrap: 'wrap' }}>
+            {isAdmin && branchesList.length > 1 && !editingProfile && (
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, fontWeight: 700, color: '#7C8092' }}>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 3l4 4-4 4"/><path d="M3 7h18"/><path d="M7 21l-4-4 4-4"/><path d="M21 17H3"/></svg>
+                Branch
+                <select value={s.branch_id || ''} onChange={(e) => quickChangeBranch(e.target.value)} data-testid="staff-branch-select"
+                  style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '6px 8px', fontSize: 12, fontWeight: 700, color: '#23252F', background: '#fff', cursor: 'pointer' }}>
+                  {branchesList.map((b) => {
+                    const bid = b.id || b.branch_id;
+                    return <option key={bid} value={bid}>{b.name}</option>;
+                  })}
+                </select>
+              </label>
+            )}
+            {isAdmin && branchesList.length > 1 && !editingProfile && (
+              <button type="button" onClick={openTransferDrawer} data-testid="staff-branch-switch"
+                style={{ border: 'none', background: 'transparent', color: '#6C4FE0', fontSize: 11, fontWeight: 700, cursor: 'pointer', textDecoration: 'underline' }}
+                title="Record a dated transfer with remarks">transfer log</button>
+            )}
+            {canEdit && !editingProfile && (
+              <button className="btn-ghost" style={{ padding: '7px 12px' }} onClick={() => toggleActive(s, s.is_active === false)} disabled={activeBusyId === s.id} data-testid="staff-active-toggle">
+                {s.is_active === false
+                  ? <><svg viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>Activate</>
+                  : <><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Deactivate</>}
+              </button>
+            )}
+            {canEdit && !editingProfile && (
+              <button className="btn-ghost" style={{ padding: '7px 12px' }} onClick={startEditProfile}>
+                <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>Edit
+              </button>
+            )}
+            {canDelete && !editingProfile && (
+              <button className="btn-danger" style={{ padding: '7px 12px' }} onClick={handleDeleteStaff} data-testid="staff-delete-btn">
+                <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Delete
+              </button>
+            )}
+            {editingProfile && (
+              <>
+                <button className="btn-ghost" style={{ padding: '7px 12px' }} onClick={() => setEditingProfile(false)}>Cancel</button>
+                <button className="btn-primary" style={{ padding: '7px 12px' }} onClick={saveProfile}>Save</button>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Photo — visible always, clickable in edit mode */}
@@ -1739,30 +1780,6 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     if (!selected) return <div className="pane-r"><div className="rbac-lock">Select a staff member from the left to view details.</div></div>;
     return (
       <div className="pane-r">
-        <div className="dhead">
-          <div className="av" style={{ background: colorFor(selected.name) }}>{initial(selected.name)}</div>
-          <div className="dn">
-            <h3>{selected.name}</h3>
-            <div className="meta">
-              <span style={{ textTransform: 'capitalize' }}>
-                {selected.category || 'Junior'}{selected.designation ? ' · ' + selected.designation : ''}
-              </span>
-              <span>
-                <svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.81.36 1.6.7 2.34a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.74-1.27a2 2 0 0 1 2.11-.45c.74.34 1.53.57 2.34.7A2 2 0 0 1 22 16.92z"/></svg>
-                {selected.phone || selected.mobile || '—'}
-              </span>
-              <span>
-                <svg viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                {salon?.city || 'Main Branch'}
-              </span>
-            </div>
-          </div>
-          {canDelete && (
-            <button className="btn-danger" onClick={handleDeleteStaff}>
-              <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Delete
-            </button>
-          )}
-        </div>
         <div className="pane-body">
           {section === 'profile' && renderProfileBody()}
           {section === 'attendance' && renderAttendanceBody()}
@@ -1774,7 +1791,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     );
   };
 
-  // ---------- Section 2/3: quick attendance ribbon + salary basis ----------
+  // ---------- Section 2/3: quick attendance drawer + salary basis ----------
   const ATT_CYCLE = ['present', 'half_day', 'absent', 'holiday', 'on_leave'];
   const ATT_META = {
     present:  { lb: 'P',  full: 'Present',  bg: '#E4F6ED', fg: '#1F8F52' },
@@ -1783,11 +1800,19 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     holiday:  { lb: 'H',  full: 'Holiday',  bg: '#F1F2F6', fg: '#7C8092' },
     on_leave: { lb: 'L',  full: 'On leave', bg: '#FFF3DC', fg: '#B87A0A' },
   };
+  const isGeoMode = ['checkinout', 'geo_checkin', 'geo'].includes(salonSettings?.attendance_method);
+  const activeStaff = (staff || []).filter((s) => s.is_active !== false);
+  const inactiveStaff = (staff || []).filter((s) => s.is_active === false);
+
   const openRibbon = () => {
-    // default everyone to Present (one-tap mark-all-present, then tweak)
-    const init = {};
-    (staff || []).forEach((s) => { init[s.id] = todayStatus[s.id] || 'present'; });
-    setRibbonStatus(init);
+    // default everyone Present (service mode) / shift times (geo mode), then tweak
+    const initS = {}; const initT = {};
+    activeStaff.forEach((s) => {
+      initS[s.id] = todayStatus[s.id] || 'present';
+      initT[s.id] = ribbonTimes[s.id] || { check_in: salonSettings?.shift_start || '10:00', check_out: '' };
+    });
+    setRibbonStatus(initS);
+    setRibbonTimes(initT);
     setRibbonOpen(true);
   };
   const cycleRibbon = (id) => {
@@ -1797,16 +1822,29 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
       return { ...prev, [id]: next };
     });
   };
+  const setRibbonStatusFor = (id, status) => setRibbonStatus((prev) => ({ ...prev, [id]: status }));
+  const setRibbonTimeFor = (id, key, val) => setRibbonTimes((prev) => ({ ...prev, [id]: { ...(prev[id] || {}), [key]: val } }));
   const setAllRibbon = (status) => {
-    const m = {}; (staff || []).forEach((s) => { m[s.id] = status; }); setRibbonStatus(m);
+    const m = {}; activeStaff.forEach((s) => { m[s.id] = status; }); setRibbonStatus(m);
   };
   const saveRibbon = async () => {
     setRibbonBusy(true);
     try {
-      const rows = Object.entries(ribbonStatus).map(([barber_id, status]) => ({ barber_id, status }));
+      let rows;
+      if (isGeoMode) {
+        rows = activeStaff.map((s) => {
+          const t = ribbonTimes[s.id] || {};
+          const st = ribbonStatus[s.id];
+          // In geo mode a status override (absent/holiday/leave) wins; otherwise send times.
+          if (st && st !== 'present' && st !== 'half_day') return { barber_id: s.id, status: st };
+          return { barber_id: s.id, check_in: t.check_in || null, check_out: t.check_out || null };
+        });
+      } else {
+        rows = Object.entries(ribbonStatus).map(([barber_id, status]) => ({ barber_id, status }));
+      }
       const res = await axios.post(`${API}/salons/${salonId}/attendance/mark`, { rows },
         { headers: getAuthHeaders?.() || {} });
-      setTodayStatus({ ...ribbonStatus });
+      setTodayStatus({ ...todayStatus, ...ribbonStatus });
       toast.success(`Attendance saved for ${res.data?.count ?? rows.length} staff`);
       setRibbonOpen(false);
     } catch (err) {
@@ -1822,6 +1860,23 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
       if (selectedId && section === 'salary') { try { await bindSalary?.(salMonth); } catch (_) { /* ignore */ } }
     } catch (err) { toast.error(formatApiError(err, 'Could not update setting')); }
   };
+  const toggleActive = async (s, next) => {
+    setActiveBusyId(s.id);
+    try {
+      await axios.put(`${API}/barbers/${s.id}`, { is_active: next }, { headers: getAuthHeaders?.() || {} });
+      setStaff((prev) => prev.map((r) => r.id === s.id ? { ...r, is_active: next } : r));
+      toast.success(next ? 'Staff activated' : 'Staff deactivated');
+    } catch (err) { toast.error(formatApiError(err, 'Could not update status')); }
+    finally { setActiveBusyId(null); }
+  };
+  const quickChangeBranch = async (bid) => {
+    if (!bid || bid === (selected?.branch_id || '')) return;
+    try {
+      await axios.put(`${API}/barbers/${selectedId}`, { branch_id: bid }, { headers: getAuthHeaders?.() || {} });
+      setStaff((prev) => prev.map((r) => r.id === selectedId ? { ...r, branch_id: bid } : r));
+      toast.success('Branch updated');
+    } catch (err) { toast.error(formatApiError(err, 'Could not change branch')); }
+  };
 
   return (
     <div className="staffv3">
@@ -1834,66 +1889,23 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         </h2>
       </div>
 
-      {/* Section 2 — quick attendance ribbon + salary basis (admins only) */}
+      {/* Section 2 — quick attendance ribbon (opens a marking drawer). Salary basis moved to Attendance settings. */}
       {viewMode === 'staff' && canAttendance && (
-        <div className="ssv3-ribbon" style={{ background: '#fff', border: '1px solid #ECECF3', borderRadius: 14, padding: '10px 14px', marginBottom: 14, boxShadow: '0 4px 16px rgba(30,32,50,.04)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 13, fontWeight: 800, color: '#23252F' }}>Today&apos;s attendance</span>
-              <span style={{ fontSize: 12, color: '#7C8092', fontWeight: 600 }}>{new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              {canSalaryView && (
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#7C8092', fontWeight: 700 }}>
-                  Salary basis
-                  <select value={prorationBasis} onChange={(e) => changeBasis(e.target.value)} disabled={!isAdmin}
-                    data-testid="salary-basis-select"
-                    style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '5px 8px', fontSize: 12, fontWeight: 700, color: '#23252F', background: '#fff', cursor: isAdmin ? 'pointer' : 'not-allowed' }}>
-                    <option value="calendar_days">Calendar days (offs paid)</option>
-                    <option value="working_days">Working days only</option>
-                  </select>
-                </label>
-              )}
-              <button className="btn-primary" style={{ padding: '8px 16px', fontSize: 12.5, fontWeight: 800, borderRadius: 10, border: 'none', background: 'linear-gradient(135deg,#6C4FE0,#8464F5)', color: '#fff', cursor: 'pointer' }}
-                onClick={() => (ribbonOpen ? setRibbonOpen(false) : openRibbon())} data-testid="quick-attendance-toggle">
-                {ribbonOpen ? 'Close' : 'Mark attendance'}
-              </button>
+        <div className="ssv3-ribbon" style={{ background: 'linear-gradient(135deg,#F6F3FF,#FFFFFF)', border: '1px solid #E7E2FF', borderRadius: 14, padding: '10px 14px', marginBottom: 14, boxShadow: '0 4px 16px rgba(30,32,50,.04)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ width: 34, height: 34, borderRadius: 10, background: '#6C4FE0', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>
+            </span>
+            <div style={{ lineHeight: 1.3 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#23252F' }}>Today&apos;s attendance</div>
+              <div style={{ fontSize: 11.5, color: '#7C8092', fontWeight: 600 }}>{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })} · {activeStaff.length} active staff</div>
             </div>
           </div>
-          {ribbonOpen && (
-            <div style={{ marginTop: 12, borderTop: '1px solid #F2F2F7', paddingTop: 12 }}>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Quick set all:</span>
-                {ATT_CYCLE.map((st) => (
-                  <button key={st} onClick={() => setAllRibbon(st)}
-                    style={{ fontSize: 11, fontWeight: 800, border: 'none', borderRadius: 8, padding: '4px 10px', cursor: 'pointer', background: ATT_META[st].bg, color: ATT_META[st].fg }}>
-                    {ATT_META[st].full}
-                  </button>
-                ))}
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8 }}>
-                {(staff || []).map((s) => {
-                  const st = ribbonStatus[s.id] || 'present';
-                  const m = ATT_META[st];
-                  return (
-                    <button key={s.id} onClick={() => cycleRibbon(s.id)} data-testid={`ribbon-staff-${s.id}`}
-                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, border: '1px solid #ECECF3', borderRadius: 10, padding: '8px 10px', background: '#fff', cursor: 'pointer', textAlign: 'left' }}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                        <span style={{ width: 26, height: 26, borderRadius: 8, background: colorFor(s.name), color: '#fff', fontSize: 11, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>{initial(s.name)}</span>
-                        <span style={{ fontSize: 12.5, fontWeight: 700, color: '#23252F', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
-                      </span>
-                      <span style={{ fontSize: 11, fontWeight: 900, borderRadius: 7, padding: '3px 9px', background: m.bg, color: m.fg, flex: 'none' }}>{m.lb}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-                <button onClick={() => setRibbonOpen(false)} style={{ fontSize: 12.5, fontWeight: 700, border: '1px solid #ECECF3', background: '#fff', color: '#5A5E70', borderRadius: 10, padding: '9px 16px', cursor: 'pointer' }}>Cancel</button>
-                <button onClick={saveRibbon} disabled={ribbonBusy} data-testid="quick-attendance-save"
-                  style={{ fontSize: 12.5, fontWeight: 800, border: 'none', background: '#2FA96A', color: '#fff', borderRadius: 10, padding: '9px 20px', cursor: 'pointer' }}>{ribbonBusy ? 'Saving…' : 'Save attendance'}</button>
-              </div>
-            </div>
-          )}
+          <button className="btn-primary" style={{ padding: '9px 18px', fontSize: 12.5, fontWeight: 800, borderRadius: 10, border: 'none', background: 'linear-gradient(135deg,#6C4FE0,#8464F5)', color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            onClick={openRibbon} data-testid="quick-attendance-toggle">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            Mark attendance
+          </button>
         </div>
       )}
 
@@ -1916,6 +1928,99 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
           </>
         )}
       </div>
+
+      {/* Section 2 — Bulk quick-attendance drawer (opens from the ribbon) */}
+      <div className={`staffv3-ov ${ribbonOpen ? 'open' : ''}`} onClick={() => !ribbonBusy && setRibbonOpen(false)} />
+      <aside className={`staffv3-drawer wide ${ribbonOpen ? 'open' : ''}`} data-testid="quick-attendance-drawer">
+        <div className="dh">
+          <div className="tt">
+            <div className="ic">
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>
+            </div>
+            <div>
+              <h3>Mark today&apos;s attendance</h3>
+              <p>{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })} · {isGeoMode ? 'Check-in / check-out times' : 'Tap a staff to change status'}</p>
+            </div>
+          </div>
+          <button className="close" onClick={() => setRibbonOpen(false)} disabled={ribbonBusy}>
+            <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div className="db-scroll" style={{ padding: '16px 20px' }}>
+          {!isGeoMode && (
+            <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Set all:</span>
+              {ATT_CYCLE.map((st) => (
+                <button key={st} onClick={() => setAllRibbon(st)}
+                  style={{ fontSize: 11, fontWeight: 800, border: 'none', borderRadius: 8, padding: '5px 11px', cursor: 'pointer', background: ATT_META[st].bg, color: ATT_META[st].fg }}>
+                  {ATT_META[st].full}
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {activeStaff.length === 0 && <div style={{ fontSize: 12.5, color: '#8A8EA0', padding: 12 }}>No active staff to mark.</div>}
+            {activeStaff.map((s) => {
+              const st = ribbonStatus[s.id] || 'present';
+              const t = ribbonTimes[s.id] || {};
+              return (
+                <div key={s.id} data-testid={`ribbon-staff-${s.id}`}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, border: '1px solid #ECECF3', borderRadius: 12, padding: '10px 12px', background: '#fff' }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                    <span style={{ width: 32, height: 32, borderRadius: 9, background: colorFor(s.name), color: '#fff', fontSize: 12, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>{initial(s.name)}</span>
+                    <span style={{ minWidth: 0 }}>
+                      <span style={{ display: 'block', fontSize: 13, fontWeight: 700, color: '#23252F', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
+                      <span style={{ display: 'block', fontSize: 11, color: '#9298AA', fontWeight: 600 }}>{s.category || 'Junior'}</span>
+                    </span>
+                  </span>
+                  {isGeoMode ? (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 'none' }}>
+                      {(st === 'absent' || st === 'holiday' || st === 'on_leave') ? (
+                        <span style={{ fontSize: 11, fontWeight: 900, borderRadius: 7, padding: '4px 10px', background: ATT_META[st].bg, color: ATT_META[st].fg }}>{ATT_META[st].full}</span>
+                      ) : (
+                        <>
+                          <input type="time" value={t.check_in || ''} onChange={(e) => setRibbonTimeFor(s.id, 'check_in', e.target.value)}
+                            style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '5px 7px', fontSize: 12, fontWeight: 700 }} title="Check-in" />
+                          <span style={{ color: '#9298AA', fontSize: 11 }}>→</span>
+                          <input type="time" value={t.check_out || ''} onChange={(e) => setRibbonTimeFor(s.id, 'check_out', e.target.value)}
+                            style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '5px 7px', fontSize: 12, fontWeight: 700 }} title="Check-out" />
+                        </>
+                      )}
+                      <select value={(st === 'absent' || st === 'holiday' || st === 'on_leave') ? st : 'present'} onChange={(e) => setRibbonStatusFor(s.id, e.target.value)}
+                        style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '5px 6px', fontSize: 11, fontWeight: 700 }} title="Override">
+                        <option value="present">In</option>
+                        <option value="absent">A</option>
+                        <option value="holiday">H</option>
+                        <option value="on_leave">L</option>
+                      </select>
+                    </span>
+                  ) : (
+                    <span style={{ display: 'flex', gap: 5, flex: 'none' }}>
+                      {ATT_CYCLE.map((code) => {
+                        const m = ATT_META[code]; const active = st === code;
+                        return (
+                          <button key={code} onClick={() => setRibbonStatusFor(s.id, code)} title={m.full}
+                            style={{ width: 34, height: 30, borderRadius: 8, fontSize: 11, fontWeight: 900, cursor: 'pointer',
+                              border: active ? `2px solid ${m.fg}` : '1px solid #ECECF3',
+                              background: active ? m.bg : '#FBFBFD', color: active ? m.fg : '#9298AA' }}>
+                            {m.lb}
+                          </button>
+                        );
+                      })}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div className="df" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '14px 20px', borderTop: '1px solid #F0F0F5' }}>
+          <button className="btn-ghost" onClick={() => setRibbonOpen(false)} disabled={ribbonBusy} style={{ padding: '9px 16px' }}>Cancel</button>
+          <button className="btn-primary" onClick={saveRibbon} disabled={ribbonBusy} data-testid="quick-attendance-save"
+            style={{ padding: '9px 22px', background: '#2FA96A', border: 'none' }}>{ribbonBusy ? 'Saving…' : 'Save attendance'}</button>
+        </div>
+      </aside>
+
 
       {/* Mark Attendance drawer */}
       <div className={`staffv3-ov ${attOpen ? 'open' : ''}`} onClick={() => !attBusy && setAttOpen(false)} />
