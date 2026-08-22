@@ -190,6 +190,9 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
   const [ribbonStatus, setRibbonStatus] = useState({}); // { barber_id: 'present'|'absent'|... }
   const [ribbonBusy, setRibbonBusy] = useState(false);
   const [ribbonTimes, setRibbonTimes] = useState({}); // { barber_id: {check_in, check_out} } for geo mode
+  // Attendance date — defaults to TODAY (IST); admin may pick a past date to back-fill.
+  const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const [ribbonDate, setRibbonDate] = useState(todayIST());
   const [showInactive, setShowInactive] = useState(false);
   const [activeBusyId, setActiveBusyId] = useState(null);
   const [todayStatus, setTodayStatus] = useState({}); // reflected on list rows after save
@@ -1813,6 +1816,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     });
     setRibbonStatus(initS);
     setRibbonTimes(initT);
+    setRibbonDate(todayIST());
     setRibbonOpen(true);
   };
   const cycleRibbon = (id) => {
@@ -1842,10 +1846,13 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
       } else {
         rows = Object.entries(ribbonStatus).map(([barber_id, status]) => ({ barber_id, status }));
       }
-      const res = await axios.post(`${API}/salons/${salonId}/attendance/mark`, { rows },
+      const isToday = ribbonDate === todayIST();
+      const res = await axios.post(`${API}/salons/${salonId}/attendance/mark`, { rows, date: ribbonDate },
         { headers: getAuthHeaders?.() || {} });
-      setTodayStatus({ ...todayStatus, ...ribbonStatus });
-      toast.success(`Attendance saved for ${res.data?.count ?? rows.length} staff`);
+      // Only refresh the "today" chips when we actually marked today.
+      if (isToday) setTodayStatus({ ...todayStatus, ...ribbonStatus });
+      const whenLabel = isToday ? 'today' : new Date(ribbonDate + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+      toast.success(`Attendance saved for ${res.data?.count ?? rows.length} staff (${whenLabel})`);
       setRibbonOpen(false);
     } catch (err) {
       toast.error(formatApiError(err, 'Could not save attendance'));
@@ -1938,8 +1945,8 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
               <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>
             </div>
             <div>
-              <h3>Mark today&apos;s attendance</h3>
-              <p>{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })} · {isGeoMode ? 'Check-in / check-out times' : 'Tap a staff to change status'}</p>
+              <h3>{ribbonDate === todayIST() ? "Mark today's attendance" : 'Back-fill attendance'}</h3>
+              <p>{new Date(ribbonDate + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })} · {isGeoMode ? 'Check-in / check-out times' : 'Tap a staff to change status'}</p>
             </div>
           </div>
           <button className="close" onClick={() => setRibbonOpen(false)} disabled={ribbonBusy}>
@@ -1947,6 +1954,20 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
           </button>
         </div>
         <div className="db-scroll" style={{ padding: '16px 20px' }}>
+          {/* Attendance date — today by default, past dates allowed */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }} data-testid="quick-attendance-date-row">
+            <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Attendance date</span>
+            <input type="date" value={ribbonDate} max={todayIST()}
+              onChange={(e) => { const v = e.target.value; if (v && v <= todayIST()) setRibbonDate(v); }}
+              data-testid="quick-attendance-date"
+              style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #E1DDEE', fontSize: 13, fontWeight: 600, color: '#2B2B3A' }} />
+            {ribbonDate !== todayIST() && (
+              <button type="button" onClick={() => setRibbonDate(todayIST())}
+                style={{ fontSize: 11, fontWeight: 800, border: '1px solid #E1DDEE', background: '#fff', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', color: '#7C5CFC' }}>
+                Back to today
+              </button>
+            )}
+          </div>
           {!isGeoMode && (
             <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
               <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Set all:</span>

@@ -6,7 +6,7 @@ Verify service_assignments are stored correctly in tokens
 import requests
 import json
 
-BASE_URL = "https://mystifying-borg-3.preview.emergentagent.com/api"
+BASE_URL = "https://frontend-dummy-fix.preview.emergentagent.com/api"
 SALON_ID = "9d2c95b0-3931-4e0c-b7e8-70aba857bd0a"
 
 LOGIN_PAYLOAD = {
