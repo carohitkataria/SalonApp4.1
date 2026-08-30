@@ -1290,7 +1290,7 @@ export default function EnhancedSalonDashboard() {
           <div className="tab-pad-legacy tab-hdr-scope">
             <TabHeaderV3
               icon="queue"
-              title="Live Queue"
+              title="Bookings"
               accent="sky"
             />
             <QueueTabV2
@@ -1424,7 +1424,7 @@ export default function EnhancedSalonDashboard() {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
         }}>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.7px', color: '#6C4FE0', textTransform: 'uppercase' }}>Queue · Booking</div>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.7px', color: '#6C4FE0', textTransform: 'uppercase' }}>Booking</div>
             <div style={{ fontSize: 18, fontWeight: 800, marginTop: 2 }}>Modify Booking</div>
           </div>
           <button

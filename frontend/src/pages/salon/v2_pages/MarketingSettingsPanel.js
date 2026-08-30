@@ -160,6 +160,14 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
   const [topupOpen, setTopupOpen] = useState(false);
   const [ledger, setLedger] = useState([]);
   const [syncing, setSyncing] = useState(false);
+  const [twilioOpen, setTwilioOpen] = useState(false);   // Part 3 — Twilio fallback accordion
+  const [metaConn, setMetaConn] = useState(null);         // Part 3 — Meta (primary) status
+
+  useEffect(() => {
+    if (!salonId) return;
+    axios.get(`${API}/salons/${salonId}/marketing/settings/waba/status`, { headers: auth() })
+      .then(r => setMetaConn(r.data)).catch(() => setMetaConn({ connected: false }));
+  }, [salonId, auth]);
 
   const fetchSnap = useCallback(async (opts = { silent: false }) => {
     if (!opts.silent) setLoading(true);
@@ -223,48 +231,19 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
         </div>
       )}
 
-      {/* WS3 — Per-salon WhatsApp Sender (own number routing via platform Twilio) */}
-      <WhatsAppSenderCard salonId={salonId} auth={auth} />
+      {/* Meta WhatsApp connection — salon submits Number + Display name; the
+          platform owner provisions the WABA credentials (Meta-only channel). */}
+      <MetaConnectCard salonId={salonId} auth={auth} conn={metaConn} onChange={setMetaConn} />
 
-      {/* CARD 1 — WhatsApp Sender & Twilio Sub-account (full width) */}
+      {/* SMS & Email billing (Twilio) — collapsible. WhatsApp is Meta-only now. */}
       <div className="row full">
-        <div className="card">
-          <div className="card__h">
-            <div className="t"><Ic.wa /> WhatsApp Sender &amp; Twilio Sub-account</div>
-            <div style={{display:'flex', gap:8, alignItems:'center'}}>
-              <StatusPill status={senderStatus} />
-              <button className="btn-g" onClick={async () => {
-                try {
-                  await axios.post(`${API}/salons/${salonId}/marketing/settings/waba/sync`, {}, { headers: auth() });
-                  toast.success('Synced from Twilio');
-                  fetchSnap({ silent: true });
-                } catch (e) { toast.error(e.response?.data?.detail || 'Sync failed'); }
-              }}><Ic.refresh /> Sync</button>
-            </div>
+        <div className="card" data-testid="settings-twilio-accordion">
+          <div className="card__h" style={{ cursor: 'pointer', marginBottom: twilioOpen ? 12 : 0 }} onClick={() => setTwilioOpen(o => !o)}>
+            <div className="t"><Ic.mail /> SMS &amp; Email billing (Twilio) <span style={{ fontSize: 11, fontWeight: 600, color: '#9A9EAE', marginLeft: 6 }}>(optional)</span></div>
+            <button className="btn-g" data-testid="settings-twilio-toggle">{twilioOpen ? 'Hide' : 'Show'} ›</button>
           </div>
-          <div className="grid2">
-            <ReadField k="Sub-account friendly name" v={sub.friendly_name} />
-            <ReadField k="Sub-account SID" v={sub.subaccount_sid} mono />
-            <ReadField k="WABA ID" v={sub.waba_id} mono />
-            <ReadField k="Sender number" v={sub.sender_phone_e164} subtitle="owned by salon" />
-            <ReadField k="Display name" v={sub.display_name} subtitle="Meta approval" />
-            <ReadField k="Quality rating" v={sub.quality_rating} />
-            <ReadField k="Messaging limit tier" v={sub.messaging_tier} />
-            <ReadField k="Messaging Service SID" v={sub.messaging_service_sid} mono />
-          </div>
-          <div className="card-foot">
-              <span className="note">Salons connect their own number via <b>Meta Embedded Signup</b>. The backend then registers the sender under this salon&apos;s Twilio sub-account.</span>
-            <div style={{display:'flex', gap:8}}>
-              <button className="btn-g" onClick={() => toast.info('Meta Business Manager → opens in a new tab (real link once META_APP_ID configured).')}>
-                <Ic.link /> Manage on WhatsApp
-              </button>
-              <button className="btn-p" onClick={() => window.dispatchEvent(new Event('mkset:open-es'))}>
-                <Ic.plus /> Re-connect number
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+          {twilioOpen && (
+          <div>
 
       {/* CARD 2 + 3 — Wallet + Spend */}
       <div className="row">
@@ -358,6 +337,10 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
           }}
         />
       </div>
+          </div>
+          )}
+        </div>
+      </div>
 
       {/* CARD 7 — Sending windows & consent */}
       <div className="row full">
@@ -388,6 +371,95 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
 }
 
 // -------- Small sub-components --------
+
+function MetaConnectCard({ salonId, auth, conn, onChange }) {
+  const [form, setForm] = React.useState({ sender_phone_e164: '', display_name: '' });
+  const [busy, setBusy] = React.useState(false);
+  const [spend, setSpend] = React.useState(null);
+  const connected = !!conn?.connected;
+  const status = conn?.status || (connected ? 'connected' : 'none');
+
+  React.useEffect(() => {
+    if (conn) setForm({ sender_phone_e164: conn.sender_phone_e164 || '', display_name: conn.display_name || '' });
+  }, [conn]);
+
+  React.useEffect(() => {
+    if (!connected) return;
+    axios.get(`${API}/salons/${salonId}/marketing/settings/meta-spend`, { headers: auth() })
+      .then(r => setSpend(r.data)).catch(() => {});
+  }, [connected, salonId, auth]);
+
+  const refetch = () => axios.get(`${API}/salons/${salonId}/marketing/settings/waba/status`, { headers: auth() })
+    .then(r => onChange(r.data)).catch(() => {});
+
+  const submit = async () => {
+    if (!form.sender_phone_e164.trim()) { toast.error('Enter your WhatsApp number'); return; }
+    setBusy(true);
+    try {
+      await axios.post(`${API}/salons/${salonId}/marketing/settings/waba/request`, form, { headers: auth() });
+      toast.success('Request submitted — our team will activate your number shortly.');
+      refetch();
+    } catch (e) { toast.error(e.response?.data?.detail || 'Request failed'); }
+    finally { setBusy(false); }
+  };
+  const disconnect = async () => {
+    if (typeof window !== 'undefined' && !window.confirm('Remove this WhatsApp connection?')) return;
+    try {
+      await axios.delete(`${API}/salons/${salonId}/marketing/settings/waba`, { headers: auth() });
+      toast.success('WhatsApp connection removed');
+      onChange({ connected: false, status: 'none' });
+    } catch (e) { toast.error('Failed to remove'); }
+  };
+
+  return (
+    <div className="row full">
+      <div className="card" data-testid="settings-meta-card" style={{ borderColor: connected ? '#CDEBD9' : undefined }}>
+        <div className="card__h">
+          <div className="t"><Ic.wa /> WhatsApp via Meta <span style={{ fontSize: 11, fontWeight: 700, color: '#25D366', marginLeft: 6 }}>PRIMARY</span></div>
+          <StatusPill status={connected ? 'active' : (status === 'pending' ? 'pending' : 'not_connected')} />
+        </div>
+        {connected ? (
+          <>
+            <div style={{ fontSize: 12.5, color: '#6b6489', lineHeight: 1.7, padding: '4px 0 10px' }}>
+              Your number <b>{conn.sender_phone_e164}</b>{conn.display_name ? ` · ${conn.display_name}` : ''} is live{conn.mock ? ' (MOCK)' : ''}.<br />
+              WABA <code>{conn.waba_id}</code> · Phone ID <code>{conn.phone_number_id}</code>
+            </div>
+            {spend?.connected && (
+              <div className="grid2">
+                <ReadField k="This month" v={spend.month} />
+                <ReadField k="Conversations sent" v={String(spend.conversations_sent ?? 0)} subtitle={spend.note} />
+              </div>
+            )}
+            <div className="card-foot">
+              <span className="note">WhatsApp billing is charged by Meta directly to your WABA.</span>
+              <button className="btn-g" onClick={disconnect} data-testid="meta-disconnect-btn"><Ic.refresh /> Remove</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 12.5, color: '#6b6489', lineHeight: 1.6, padding: '4px 0 12px' }}>
+              {status === 'pending'
+                ? <>Your request was received. Our team is provisioning your WhatsApp number — this shows <b>Connected</b> once done. You can update your details below.</>
+                : <>Send from your own WhatsApp number. Just enter your number and display name — we set up the Meta connection for you (no Meta login needed).</>}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div className="form-field"><label>WhatsApp number</label>
+                <input value={form.sender_phone_e164} onChange={e => setForm(f => ({ ...f, sender_phone_e164: e.target.value }))} placeholder="+9198…" data-testid="meta-number-input" />
+              </div>
+              <div className="form-field"><label>Display name</label>
+                <input value={form.display_name} onChange={e => setForm(f => ({ ...f, display_name: e.target.value }))} placeholder="e.g. Glam Studio" data-testid="meta-display-input" />
+              </div>
+            </div>
+            <div className="card-foot">
+              <span className="note">{status === 'pending' ? 'Status: pending activation by platform.' : 'The rest is handled by the SalonHub team.'}</span>
+              <button className="btn-p" style={{ marginTop: 10 }} disabled={busy} onClick={submit} data-testid="meta-request-btn"><Ic.plus /> {busy ? 'Submitting…' : (status === 'pending' ? 'Update details' : 'Request connection')}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function WhatsAppSenderCard({ salonId, auth }) {
   const [data, setData] = useState(null);

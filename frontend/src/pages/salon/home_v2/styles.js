@@ -165,7 +165,10 @@ export const HOME_V2_CSS = `
 .shv2 .queue__ctrls{display:flex;align-items:center;gap:8px}
 .shv2 .queue__ctrls select{font-size:12px;font-weight:600;color:var(--ink-soft);border:1px solid var(--line);border-radius:8px;padding:5px 9px;outline:none;background:var(--surface)}
 .shv2 .queue__ctrls a{font-size:12px;color:var(--primary);font-weight:700;display:flex;align-items:center;gap:2px;cursor:pointer}
-.shv2 .qlist{display:flex;flex-direction:column;gap:8px;overflow:auto;flex:1}
+.shv2 .qlist{display:flex;flex-direction:column;gap:8px;overflow-y:auto;overflow-x:hidden;flex:1;max-height:248px}
+/* Phase 7.1 — fixed-height, internally-scrolling card lists so long lists
+   (staff leaderboard, top services) never grow the page. */
+.shv2 .shv2-scrolllist{max-height:236px;overflow-y:auto;overflow-x:hidden}
 .shv2 .q-row{display:flex;align-items:center;gap:11px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;transition:.15s}
 .shv2 .q-row:hover{border-color:var(--primary-100);background:var(--primary-050)}
 .shv2 .q-pos{width:24px;height:24px;border-radius:8px;background:var(--primary-050);color:var(--primary);font-weight:800;font-size:12px;display:grid;place-items:center;flex:none}
@@ -506,7 +509,7 @@ export const HOME_V2_CSS = `
 .shv2-profile .p-details .k{font-size:11px;font-weight:700;color:#7C8092}
 .shv2-profile .p-details .v{font-size:13px;font-weight:600;color:#23252F;margin-bottom:4px}
 .shv2-profile .hist{background:#FFFFFF;border:1px solid #ECECF3;border-radius:12px;overflow:hidden}
-.shv2-profile .hist .row{display:grid;grid-template-columns:100px 1fr 80px 90px 90px;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid #F3F3F8;font-size:12.5px;font-weight:600}
+.shv2-profile .hist .row{display:grid;grid-template-columns:92px 1fr 64px 84px 84px 96px;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid #F3F3F8;font-size:12.5px;font-weight:600}
 .shv2-profile .hist .row.head{background:#F6F6FB;font-size:10.5px;font-weight:800;letter-spacing:.3px;text-transform:uppercase;color:#7C8092}
 .shv2-profile .hist .row:last-child{border-bottom:none}
 .shv2-profile .hist .badge{font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.2px;justify-self:start}

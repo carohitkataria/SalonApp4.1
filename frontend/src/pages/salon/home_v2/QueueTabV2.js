@@ -213,6 +213,12 @@ export default function QueueTabV2({
   const [profilePhone, setProfilePhone] = useState(null); // customer profile modal
   const changeView = (v) => { setView(v); try { localStorage.setItem('qv2_view', v); } catch (_) { /* ignore */ } };
 
+  // Phase 6.3 — salon-controlled sorting (remembered across sessions).
+  const [sortKey, setSortKey] = useState(() => { try { return localStorage.getItem('qv2_sortkey') || 'time'; } catch (_) { return 'time'; } });
+  const [sortDir, setSortDir] = useState(() => { try { return localStorage.getItem('qv2_sortdir') || 'desc'; } catch (_) { return 'desc'; } });
+  const changeSort = (k) => { setSortKey(k); try { localStorage.setItem('qv2_sortkey', k); } catch (_) { /* ignore */ } };
+  const toggleSortDir = () => setSortDir((d) => { const n = d === 'asc' ? 'desc' : 'asc'; try { localStorage.setItem('qv2_sortdir', n); } catch (_) { /* ignore */ } return n; });
+
   // Resolve service IDs -> names for the List view (bookings sometimes store ids).
   const [svcMap, setSvcMap] = useState({});
   const _qHeaders = (typeof getAuthHeaders === 'function') ? getAuthHeaders() : {};
@@ -278,6 +284,35 @@ export default function QueueTabV2({
 
   const anyWaiting = tokens.some(t => t.status === 'waiting');
 
+  // Phase 6.3 — one sorted list of everything (walk-in queue + upcoming
+  // appointments + completed/invoiced), ordered by the salon's chosen field.
+  const sortedTokens = useMemo(() => {
+    const arr = [...(tokens || [])];
+    const STATUS_ORDER = { waiting: 0, called: 1, 'in-service': 1, completed: 2, skipped: 3, cancelled: 4, 'no-show': 5 };
+    const val = (t) => {
+      switch (sortKey) {
+        case 'status': return STATUS_ORDER[t.status] ?? 99;
+        case 'customer': return (t.customer_name || '').toString().toLowerCase();
+        case 'staff': return (t.barber_name || '').toString().toLowerCase();
+        case 'amount': return Number(t.total_amount || 0);
+        case 'time':
+        default: return new Date(t.created_at || t.date || 0).getTime() || 0;
+      }
+    };
+    arr.sort((a, b) => {
+      const va = val(a); const vb = val(b);
+      if (va < vb) return sortDir === 'asc' ? -1 : 1;
+      if (va > vb) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return arr;
+  }, [tokens, sortKey, sortDir]);
+
+  const SORT_OPTIONS = [
+    ['time', 'Time'], ['status', 'Status'], ['customer', 'Customer'],
+    ['staff', 'Staff'], ['amount', 'Amount'],
+  ];
+
   return (
     <div className="qv2">
       {/* -------- Top bar: date mode + view label -------- */}
@@ -300,6 +335,28 @@ export default function QueueTabV2({
               <input type="date" value={dateFrom || ''} onChange={e => setDateFrom(e.target.value)} />
               <span>→</span>
               <input type="date" value={dateTo || ''} onChange={e => setDateTo(e.target.value)} />
+            </div>
+          )}
+          {view !== 'calendar' && (
+            <div className="qv2-sort" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#8A8F9E', textTransform: 'uppercase', letterSpacing: '.4px' }}>Sort</span>
+              <select
+                value={sortKey}
+                onChange={(e) => changeSort(e.target.value)}
+                title="Sort bookings by"
+                data-testid="queue-sort-field"
+                style={{ fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700, color: '#3A3D4C', border: '1px solid #E4E4EF', borderRadius: 9, padding: '6px 8px', background: '#fff', cursor: 'pointer' }}
+              >
+                {SORT_OPTIONS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              </select>
+              <button
+                onClick={toggleSortDir}
+                title={sortDir === 'asc' ? 'Ascending' : 'Descending'}
+                data-testid="queue-sort-dir"
+                style={{ fontFamily: 'inherit', fontSize: 13, fontWeight: 800, color: '#6C4FE0', border: '1px solid #E4E4EF', borderRadius: 9, padding: '6px 10px', background: '#fff', cursor: 'pointer' }}
+              >
+                {sortDir === 'asc' ? '↑ Asc' : '↓ Desc'}
+              </button>
             </div>
           )}
         </div>
@@ -373,7 +430,7 @@ export default function QueueTabV2({
                 ))}
               </div>
             )}
-            {tokens.map(t => {
+            {sortedTokens.map(t => {
               const st = t.status || 'waiting';
               const names = svcNames(t);
               const extra = names.length > 2 ? names.length - 2 : 0;
@@ -486,7 +543,7 @@ export default function QueueTabV2({
           </div>
         )}
 
-        {tokens.map(t => {
+        {sortedTokens.map(t => {
           const st = t.status || 'waiting';
           return (
             <div key={t.id} className={`qv2-card st-${st}`}>

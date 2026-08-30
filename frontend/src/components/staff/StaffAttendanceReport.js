@@ -55,6 +55,10 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [drawerRow, setDrawerRow] = useState(null); // Phase 8.3 — sessions detail drawer
+
+  const fmtHm = (m) => (m != null ? `${Math.floor(m / 60)}h ${m % 60}m` : '—');
+  const fmtClock = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (_) { return '—'; } };
 
   const headers = useMemo(() => getAuthHeaders?.() || {}, [getAuthHeaders]);
 
@@ -223,7 +227,10 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
               <tr><td colSpan={10} className="text-center py-8 text-muted-foreground">No data in this range.</td></tr>
             ) : (
               rows.map((r, i) => (
-                <tr key={`${r.staff_id}-${r.date}-${i}`} className="border-t border-border">
+                <tr key={`${r.staff_id}-${r.date}-${i}`}
+                    onClick={() => setDrawerRow(r)}
+                    data-testid={`rpt-row-${r.staff_id}-${r.date}`}
+                    className="border-t border-border cursor-pointer hover:bg-muted/30">
                   <td className="px-3 py-2">{r.branch}</td>
                   <td className="px-3 py-2">{r.date}</td>
                   <td className="px-3 py-2">{r.staff_name}</td>
@@ -271,7 +278,53 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
 
       <p className="text-xs text-muted-foreground">
         Each row reflects the attendance mode active on that specific date — so months spanning a switch read correctly.
+        Click any row to see every check-in / check-out for that day.
       </p>
+
+      {/* Phase 8.3 — right-side drawer listing every check-in/out pair for the day */}
+      {drawerRow && (
+        <div className="fixed inset-0 z-50" data-testid="attendance-sessions-drawer">
+          <div className="absolute inset-0 bg-black/30" onClick={() => setDrawerRow(null)} />
+          <aside className="absolute right-0 top-0 h-full w-full max-w-md bg-background shadow-2xl border-l border-border p-5 overflow-y-auto">
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div>
+                <div className="text-base font-semibold text-foreground">{drawerRow.staff_name}</div>
+                <div className="text-xs text-muted-foreground">{drawerRow.date} · {drawerRow.branch}</div>
+              </div>
+              <button onClick={() => setDrawerRow(null)} data-testid="sessions-drawer-close"
+                      className="text-muted-foreground hover:text-foreground text-lg leading-none px-2">×</button>
+            </div>
+
+            <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 mb-4 flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground">Total time served</span>
+              <span className="text-sm font-bold text-foreground" data-testid="sessions-total">{fmtHm(drawerRow.worked_minutes)}</span>
+            </div>
+
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+              Sessions ({(drawerRow.sessions || []).length})
+            </div>
+            {(!drawerRow.sessions || drawerRow.sessions.length === 0) ? (
+              <div className="text-sm text-muted-foreground py-6 text-center">
+                No check-in / check-out sessions recorded for this day.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {drawerRow.sessions.map((s, idx) => (
+                  <div key={idx} data-testid={`session-row-${idx}`}
+                       className="rounded-lg border border-border px-4 py-3 flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="font-semibold text-emerald-700">{fmtClock(s.check_in_at)}</span>
+                      <span className="text-muted-foreground">→</span>
+                      <span className="font-semibold text-rose-700">{s.check_out_at ? fmtClock(s.check_out_at) : 'open'}</span>
+                    </div>
+                    <span className="text-xs font-medium text-muted-foreground">{s.minutes != null ? fmtHm(s.minutes) : '—'}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
     </div>
   );
 }

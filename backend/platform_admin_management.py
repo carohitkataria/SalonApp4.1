@@ -313,6 +313,91 @@ async def activate_whatsapp_sender(
 import salon_marketing_settings as _mkt  # reuse wallet helpers (shared _db)
 
 
+# ---------- Meta WhatsApp connections (platform owner console) ----------
+@management_router.get("/wa-meta-connections")
+async def list_wa_meta_connections(admin=Depends(require_platform_admin)):
+    """All salon Meta-WhatsApp connections (pending + connected). The owner fills
+    the WABA / Phone Number ID / access token for each pending salon."""
+    rows = []
+    cursor = _db.salon_channel_connections.find({"provider": "meta"}, {"_id": 0}).sort("requested_at", 1)
+    async for c in cursor:
+        salon = await _db.salons.find_one({"id": c.get("salon_id")}, {"_id": 0, "salon_name": 1, "owner_name": 1, "city": 1}) or {}
+        connected = bool(c.get("waba_id") and c.get("phone_number_id"))
+        rows.append({
+            "salon_id": c.get("salon_id"),
+            "salon_name": salon.get("salon_name"),
+            "owner_name": salon.get("owner_name"),
+            "city": salon.get("city"),
+            "sender_phone_e164": c.get("sender_phone_e164"),
+            "display_name": c.get("display_name"),
+            "status": "connected" if connected else (c.get("status") or "pending"),
+            "waba_id": c.get("waba_id"),
+            "phone_number_id": c.get("phone_number_id"),
+            "verified": bool(c.get("verified")),
+            "requested_at": c.get("requested_at"),
+            "connected_at": c.get("connected_at"),
+        })
+    pending = [r for r in rows if r["status"] != "connected"]
+    return {"rows": rows, "pending": pending, "total": len(rows), "pending_count": len(pending)}
+
+
+class WAMetaConnectIn(BaseModel):
+    waba_id: str = Field(..., min_length=3)
+    phone_number_id: str = Field(..., min_length=3)
+    access_token: str = Field(..., min_length=3)
+    display_name: Optional[str] = None
+
+
+@management_router.put("/salons/{salon_id}/wa-meta-connect")
+async def owner_connect_wa_meta(salon_id: str, body: WAMetaConnectIn, admin=Depends(require_platform_admin)):
+    """Platform owner provisions a salon's WhatsApp number: saves the WABA ID,
+    Phone Number ID and access token → salon flips from PENDING to CONNECTED.
+    Provisions the shared templates onto the WABA (mock-safe)."""
+    now = datetime.now(timezone.utc).isoformat()
+    token = (body.access_token or "").strip()
+    live = _mkt._meta_enabled() and token and not token.startswith("mock")
+    conn = {
+        "salon_id": salon_id,
+        "provider": "meta",
+        "waba_id": body.waba_id.strip(),
+        "phone_number_id": body.phone_number_id.strip(),
+        "access_token": token,
+        "status": "connected",
+        "verified": bool(live),
+        "mock": not live,
+        "connected_via": "platform_owner",
+        "connected_at": now,
+        "updated_at": now,
+    }
+    if body.display_name:
+        conn["display_name"] = body.display_name.strip()
+    await _db.salon_channel_connections.update_one(
+        {"salon_id": salon_id, "provider": "meta"},
+        {"$set": conn, "$setOnInsert": {"created_at": now, "requested_at": now}},
+        upsert=True,
+    )
+    try:
+        await _mkt.provision_templates_for_waba(conn["waba_id"], token)
+    except Exception:
+        pass
+    await _write_audit(admin=admin, action="wa_meta_connect", target="salon_channel_connections",
+                       target_id=salon_id, payload={"waba_id": conn["waba_id"], "phone_number_id": conn["phone_number_id"]})
+    return {"ok": True, "status": "connected", "mock": not live, "salon_id": salon_id}
+
+
+@management_router.delete("/salons/{salon_id}/wa-meta-connect")
+async def owner_revoke_wa_meta(salon_id: str, admin=Depends(require_platform_admin)):
+    """Revoke a salon's Meta connection (clears creds → back to pending)."""
+    now = datetime.now(timezone.utc).isoformat()
+    await _db.salon_channel_connections.update_one(
+        {"salon_id": salon_id, "provider": "meta"},
+        {"$set": {"status": "pending", "updated_at": now},
+         "$unset": {"waba_id": "", "phone_number_id": "", "access_token": "", "verified": "", "connected_at": ""}},
+    )
+    await _write_audit(admin=admin, action="wa_meta_revoke", target="salon_channel_connections", target_id=salon_id, payload={})
+    return {"ok": True, "status": "pending", "salon_id": salon_id}
+
+
 class WalletCreditRequest(BaseModel):
     amount: float = Field(..., gt=0, le=1000000, description="Amount to credit, in INR")
     note: str = Field(..., min_length=2, max_length=300)

@@ -60,6 +60,7 @@ export default function QuickAttendanceDrawer({ open, onClose, salonId, getAuthH
   const [status, setStatus] = useState({}); // { barber_id: 'present'|... }
   const [times, setTimes] = useState({});   // { barber_id: {check_in, check_out} }
   const [date, setDate] = useState(todayIST());
+  const [selected, setSelected] = useState({}); // Phase 8.1 — { barber_id: bool } for "Mark selected"
 
   const authHeaders = useCallback(() => {
     try { return (getAuthHeaders && getAuthHeaders()) || {}; } catch (_) { return {}; }
@@ -89,13 +90,15 @@ export default function QuickAttendanceDrawer({ open, onClose, salonId, getAuthH
         setStaff(list);
         setSettings(st);
         const act = list.filter((s) => s.is_active !== false);
-        const initS = {}; const initT = {};
+        const initS = {}; const initT = {}; const initSel = {};
         act.forEach((s) => {
           initS[s.id] = 'present';
           initT[s.id] = { check_in: st.shift_start || '10:00', check_out: '' };
+          initSel[s.id] = true;
         });
         setStatus(initS);
         setTimes(initT);
+        setSelected(initSel);
         setDate(todayIST());
       } catch (err) {
         if (!cancelled) toast.error(formatApiError(err, 'Could not load staff'));
@@ -109,6 +112,17 @@ export default function QuickAttendanceDrawer({ open, onClose, salonId, getAuthH
   const setStatusFor = (id, s) => setStatus((prev) => ({ ...prev, [id]: s }));
   const setTimeFor = (id, key, val) => setTimes((prev) => ({ ...prev, [id]: { ...(prev[id] || {}), [key]: val } }));
   const setAll = (s) => { const m = {}; activeStaff.forEach((x) => { m[x.id] = s; }); setStatus(m); };
+
+  // Phase 8.1 — per-row selection + "Mark selected" (apply a status to only checked rows).
+  const toggleSel = (id) => setSelected((prev) => ({ ...prev, [id]: !prev[id] }));
+  const selCount = activeStaff.filter((s) => selected[s.id]).length;
+  const allSelected = activeStaff.length > 0 && selCount === activeStaff.length;
+  const toggleSelAll = () => { const m = {}; activeStaff.forEach((s) => { m[s.id] = !allSelected; }); setSelected(m); };
+  const markSelected = (st) => setStatus((prev) => {
+    const m = { ...prev };
+    activeStaff.forEach((s) => { if (selected[s.id]) m[s.id] = st; });
+    return m;
+  });
 
   const save = async () => {
     setBusy(true);
@@ -169,11 +183,27 @@ export default function QuickAttendanceDrawer({ open, onClose, salonId, getAuthH
             )}
           </div>
           {!isGeoMode && activeStaff.length > 0 && (
-            <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
               <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Set all:</span>
               {ATT_CYCLE.map((st) => (
                 <button key={st} onClick={() => setAll(st)}
                   style={{ fontSize: 11, fontWeight: 800, border: 'none', borderRadius: 8, padding: '5px 11px', cursor: 'pointer', background: ATT_META[st].bg, color: ATT_META[st].fg }}>
+                  {ATT_META[st].full}
+                </button>
+              ))}
+            </div>
+          )}
+          {activeStaff.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center', background: '#F7F6FD', border: '1px solid #ECE9F9', borderRadius: 10, padding: '8px 10px' }} data-testid="mark-selected-bar">
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, fontWeight: 800, color: '#5A5F72', cursor: 'pointer' }}>
+                <input type="checkbox" checked={allSelected} onChange={toggleSelAll} data-testid="select-all-staff" />
+                Select all
+              </label>
+              <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Mark selected ({selCount}):</span>
+              {ATT_CYCLE.map((st) => (
+                <button key={st} onClick={() => markSelected(st)} disabled={selCount === 0}
+                  data-testid={`mark-selected-${st}`}
+                  style={{ fontSize: 11, fontWeight: 800, border: 'none', borderRadius: 8, padding: '5px 11px', cursor: selCount === 0 ? 'not-allowed' : 'pointer', opacity: selCount === 0 ? 0.5 : 1, background: ATT_META[st].bg, color: ATT_META[st].fg }}>
                   {ATT_META[st].full}
                 </button>
               ))}
@@ -187,8 +217,10 @@ export default function QuickAttendanceDrawer({ open, onClose, salonId, getAuthH
               const t = times[s.id] || {};
               return (
                 <div key={s.id} data-testid={`ribbon-staff-${s.id}`}
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, border: '1px solid #ECECF3', borderRadius: 12, padding: '10px 12px', background: '#fff' }}>
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, border: `1px solid ${selected[s.id] ? '#D8CFF7' : '#ECECF3'}`, borderRadius: 12, padding: '10px 12px', background: selected[s.id] ? '#FBFAFF' : '#fff' }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                    <input type="checkbox" checked={!!selected[s.id]} onChange={() => toggleSel(s.id)}
+                      data-testid={`select-staff-${s.id}`} style={{ flex: 'none', cursor: 'pointer' }} />
                     <span style={{ width: 32, height: 32, borderRadius: 9, background: colorFor(s.name), color: '#fff', fontSize: 12, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>{initial(s.name)}</span>
                     <span style={{ minWidth: 0 }}>
                       <span style={{ display: 'block', fontSize: 13, fontWeight: 700, color: '#23252F', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>

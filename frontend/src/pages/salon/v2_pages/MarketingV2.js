@@ -423,6 +423,9 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
   useV2Styles();
 
   const [tab, setTab] = useState('overview');
+  const [campaignMode, setCampaignMode] = useState('oneoff'); // 'oneoff' | 'automated'
+  const [libraryOpen, setLibraryOpen] = useState(false);      // Templates → library section
+  const [previewLib, setPreviewLib] = useState(null);         // Templates → library preview modal
   const [overview, setOverview] = useState(null);
   const [campaigns, setCampaigns] = useState([]);
   const [automations, setAutomations] = useState([]);
@@ -431,6 +434,10 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
   const [plans, setPlans] = useState([]);
   const [segments, setSegments] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Phase 3.2 / Phase 2 — platform template library + WhatsApp (Meta) connection.
+  const [library, setLibrary] = useState([]);
+  const [waConn, setWaConn] = useState(null);
+  const [waBusy, setWaBusy] = useState(false);
 
   // Drawers
   const [campaignDrawer, setCampaignDrawer] = useState(false);
@@ -473,10 +480,111 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
       setCoupons(cop.status === 'fulfilled' ? (cop.value.data.coupons || []) : []);
       setSegments(sg.status === 'fulfilled' ? (sg.value.data.segments || []) : []);
       setPlans(pl.status === 'fulfilled' ? (pl.value.data.plans || []) : []);
+      try {
+        const lib = await axios.get(`${API}/platform/template-library?only_enabled=true`, { headers: authHeaders() });
+        setLibrary(lib.data.templates || []);
+      } catch { setLibrary([]); }
     } finally { if (!opts.silent) setLoading(false); }
   }, [salonId, authHeaders]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Phase 2 — Meta Embedded Signup helpers (mock/fallback when no Meta app).
+  const META_APP_ID = process.env.REACT_APP_META_APP_ID;
+  const META_CONFIG_ID = process.env.REACT_APP_META_EMBEDDED_SIGNUP_CONFIG_ID;
+  const waSignupRef = useRef({});
+  useEffect(() => {
+    if (!META_APP_ID) return; // no Meta app configured — mock connect only
+    if (document.getElementById('meta-jssdk')) return;
+    window.fbAsyncInit = () => { try { window.FB.init({ appId: META_APP_ID, autoLogAppEvents: true, xfbml: true, version: 'v21.0' }); } catch (_) {} };
+    const s = document.createElement('script');
+    s.id = 'meta-jssdk'; s.src = 'https://connect.facebook.net/en_US/sdk.js';
+    s.async = true; s.defer = true; s.crossOrigin = 'anonymous';
+    document.body.appendChild(s);
+    const onMsg = (event) => {
+      if (!String(event.origin || '').endsWith('facebook.com')) return;
+      try {
+        const d = JSON.parse(event.data);
+        if (d.type === 'WA_EMBEDDED_SIGNUP' && d.data) {
+          waSignupRef.current = { waba_id: d.data.waba_id, phone_number_id: d.data.phone_number_id };
+        }
+      } catch (_) {}
+    };
+    window.addEventListener('message', onMsg);
+    const gotoTemplates = () => setTab('templates');
+    window.addEventListener('mkset:goto-templates', gotoTemplates);
+    return () => {
+      window.removeEventListener('message', onMsg);
+      window.removeEventListener('mkset:goto-templates', gotoTemplates);
+    };
+  }, [META_APP_ID]);
+
+  const completeSignup = useCallback(async ({ code, waba_id, phone_number_id }) => {
+    setWaBusy(true);
+    try {
+      const r = await axios.post(
+        `${API}/salons/${salonId}/marketing/settings/waba/embedded-signup-complete`,
+        { code, waba_id, phone_number_id }, { headers: authHeaders() });
+      setWaConn(r.data);
+      toast.success(r.data?.mock
+        ? 'WhatsApp connected (MOCK — add Meta keys to go live)'
+        : 'WhatsApp connected — templates provisioning');
+      fetchAll({ silent: true });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'WhatsApp connect failed');
+    } finally { setWaBusy(false); }
+  }, [salonId, authHeaders, fetchAll]);
+
+  const connectWhatsApp = useCallback(() => {
+    if (META_APP_ID && META_CONFIG_ID && window.FB) {
+      window.FB.login((resp) => {
+        const code = resp?.authResponse?.code;
+        if (!code) { toast.error('Signup was cancelled'); return; }
+        completeSignup({ code, waba_id: waSignupRef.current?.waba_id, phone_number_id: waSignupRef.current?.phone_number_id });
+      }, { config_id: META_CONFIG_ID, response_type: 'code', override_default_response_type: true, extras: { setup: {} } });
+    } else {
+      // No Meta app configured yet — mock connect so the flow is usable.
+      completeSignup({ waba_id: `mock-waba-${(salonId || '').slice(0, 6)}`, phone_number_id: `mock-phone-${(salonId || '').slice(0, 6)}` });
+    }
+  }, [META_APP_ID, META_CONFIG_ID, completeSignup, salonId]);
+
+  const addLibraryTemplate = useCallback(async (lib) => {
+    try {
+      const r = await axios.post(
+        `${API}/salons/${salonId}/marketing/settings/library/${lib.id}/adopt`, {}, { headers: authHeaders() });
+      toast.success(r.data?.mock
+        ? `Added "${lib.friendly_name || lib.name}" to your account (MOCK)`
+        : `Added "${lib.friendly_name || lib.name}" — status ${r.data?.status}`);
+      fetchAll({ silent: true });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Could not add template');
+    }
+  }, [salonId, authHeaders, fetchAll]);
+
+  const manualConnectWA = useCallback(async (form) => {
+    setWaBusy(true);
+    try {
+      const r = await axios.post(
+        `${API}/salons/${salonId}/marketing/settings/waba/manual-connect`, form, { headers: authHeaders() });
+      setWaConn(r.data);
+      toast.success(r.data?.mock ? 'WhatsApp connected (MOCK — add Meta keys to go live)' : 'WhatsApp connected & verified');
+      fetchAll({ silent: true });
+      return true;
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Manual connect failed');
+      return false;
+    } finally { setWaBusy(false); }
+  }, [salonId, authHeaders, fetchAll]);
+
+  const disconnectWA = useCallback(async () => {
+    if (typeof window !== 'undefined' && !window.confirm('Disconnect this WhatsApp number?')) return;
+    try {
+      await axios.delete(`${API}/salons/${salonId}/marketing/settings/waba`, { headers: authHeaders() });
+      setWaConn(null);
+      toast.success('WhatsApp disconnected');
+      fetchAll({ silent: true });
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Disconnect failed'); }
+  }, [salonId, authHeaders, fetchAll]);
 
   // Silent auto-refresh — every 60s. Never toggles the loading skeleton
   // (prevents the page-jump the user reported).
@@ -506,22 +614,31 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
     return { sent, delivered, delvPct, read, clickPct, redeems, revenue, ros };
   }, [overview]);
 
-  // Channel mix — derived from messages field on marketing_messages via campaigns
+  // Channel mix — prefer real per-channel sent counts from the overview endpoint;
+  // fall back to campaign-derived counts, then to a sensible default when there's
+  // no data yet so the bar never renders empty.
   const channelMix = useMemo(() => {
     const acc = { whatsapp: 0, sms: 0, email: 0 };
-    (campaigns || []).forEach(c => {
-      const prov = String(c.provider || 'whatsapp').toLowerCase();
-      const key = prov.includes('email') ? 'email' : prov.includes('sms') ? 'sms' : 'whatsapp';
-      const sent = (c.stats?.sent) || 0;
-      acc[key] += sent;
-    });
+    const cm = overview?.channel_mix;
+    if (cm && (Number(cm.whatsapp) + Number(cm.sms) + Number(cm.email)) > 0) {
+      acc.whatsapp = Number(cm.whatsapp) || 0;
+      acc.sms = Number(cm.sms) || 0;
+      acc.email = Number(cm.email) || 0;
+    } else {
+      (campaigns || []).forEach(c => {
+        const prov = String(c.provider || 'whatsapp').toLowerCase();
+        const key = prov.includes('email') ? 'email' : prov.includes('sms') ? 'sms' : 'whatsapp';
+        const sent = (c.stats?.sent) || 0;
+        acc[key] += sent;
+      });
+    }
     const total = acc.whatsapp + acc.sms + acc.email;
     return {
       whatsapp: total ? Math.round(acc.whatsapp / total * 100) : 56,
       sms:      total ? Math.round(acc.sms / total * 100) : 29,
       email:    total ? Math.round(acc.email / total * 100) : 15,
     };
-  }, [campaigns]);
+  }, [campaigns, overview]);
 
   const activeCampaigns = useMemo(
     () => (campaigns || []).filter(c => ['running','scheduled','live'].includes(String(c.status || '').toLowerCase())).slice(0, 3),
@@ -565,7 +682,6 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
         {[
           { id: 'overview', label: 'Overview', ic: Ico.chart },
           { id: 'campaigns', label: 'Campaigns', ic: Ico.send },
-          { id: 'automations', label: 'Automations', ic: Ico.bolt },
           { id: 'templates', label: 'Templates', ic: Ico.chat },
           { id: 'offers', label: 'Offers & Perks', ic: Ico.tag },
           { id: 'reputation', label: 'Reputation', ic: Ico.star },
@@ -672,6 +788,12 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
 
       {/* ===== CAMPAIGNS ===== */}
       {tab === 'campaigns' && (
+        <div>
+          <div className="subtabs" style={{ marginTop: -4, marginBottom: 14 }}>
+            <button className={`subtab ${campaignMode === 'oneoff' ? 'on' : ''}`} onClick={() => setCampaignMode('oneoff')}><Ico.send /> One-off</button>
+            <button className={`subtab ${campaignMode === 'automated' ? 'on' : ''}`} onClick={() => setCampaignMode('automated')}><Ico.bolt /> Automated</button>
+          </div>
+          {campaignMode === 'oneoff' && (
         <div className="card">
           <div className="card__h">
             <div className="t"><Ico.send /> All campaigns</div>
@@ -704,10 +826,10 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
             })}
           </div>
         </div>
-      )}
+          )}
 
-      {/* ===== AUTOMATIONS ===== */}
-      {tab === 'automations' && (
+          {/* ===== AUTOMATIONS (inside Campaigns tab) ===== */}
+          {campaignMode === 'automated' && (
         <div className="card">
           <div className="card__h">
             <div className="t"><Ico.bolt /> Always-on automations</div>
@@ -759,11 +881,18 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
             })}
           </div>
         </div>
+          )}
+        </div>
       )}
 
       {/* ===== TEMPLATES ===== */}
       {tab === 'templates' && (
         <div>
+          <div className="card" style={{ marginBottom: 16, background: 'var(--wa-bg,#e7f6ed)', borderColor: '#CDEBD9' }}>
+            <div style={{ fontSize: 12.5, color: 'var(--ink-soft)', lineHeight: 1.6 }}>
+              <b>WhatsApp is sent via Meta.</b> Connect your number in <b>Marketing → Settings</b>. Here you build message templates and pick which one fires per event.
+            </div>
+          </div>
           <div className="card__h" style={{marginBottom:16}}>
             <div className="t"><Ico.chat />Message templates</div>
             <button className="btn-primary" onClick={() => setTemplateDrawer(true)}><Ico.plus />New template</button>
@@ -820,6 +949,56 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
                 </div>
               );
             })}
+          </div>
+
+          {/* ===== Part 2D — Event templates (which approved template fires per event) ===== */}
+          <EventTemplatesPanel salonId={salonId} authHeaders={authHeaders} />
+
+          {/* ===== Part 2B — Template library (collapsible, under Templates) ===== */}
+          <div className="card" style={{ marginTop: 18 }} data-testid="template-library-section">
+            <div className="card__h" style={{ cursor: 'pointer' }} onClick={() => setLibraryOpen(o => !o)}>
+              <div className="t"><Ico.images /> Template library</div>
+              <button className="btn-ghost" data-testid="library-toggle-btn">{libraryOpen ? 'Hide' : 'Browse library'} ›</button>
+            </div>
+            {libraryOpen && (
+              <div>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 14px', lineHeight: 1.6 }}>
+                  Ready-made templates maintained by the platform. Preview one, then <b>Add to my account</b> to create it on your
+                  WhatsApp number and submit for approval — no form to fill. (Connect WhatsApp first.)
+                </p>
+                {library.length === 0 && (
+                  <div className="placeholder"><div className="pi"><Ico.images /></div><b>No library templates yet</b><p>The platform owner has not published any shared templates.</p></div>
+                )}
+                {['invoice', 'booking', 'queue_followup', 'reminder', 'marketing'].map((grp) => {
+                  const items = (library || []).filter((l) => (l.group || 'marketing') === grp);
+                  if (!items.length) return null;
+                  const GRP_LABEL = { invoice: 'Invoice', booking: 'Booking confirmation', queue_followup: 'Queue follow-up', reminder: 'Reminder', marketing: 'Marketing' };
+                  return (
+                    <div key={grp} style={{ marginBottom: 16 }}>
+                      <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em', color: 'var(--muted,#6b6489)', marginBottom: 8 }}>{GRP_LABEL[grp] || grp}</div>
+                      <div className="v2-grid2b">
+                        {items.map((lib) => (
+                          <div className="tmpl" key={lib.id} data-testid={`library-card-${lib.name}`}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                              <span className="wa-badge">{(lib.category || 'UTILITY').toString().toUpperCase()}</span>
+                              <div style={{ display: 'flex', gap: 6 }}>
+                                <button type="button" className="btn-ghost" style={{ padding: '5px 9px', fontSize: 11 }} onClick={() => setPreviewLib(lib)} data-testid={`library-preview-${lib.name}`}><Ico.chat /> Preview</button>
+                                <button type="button" className="btn-primary" style={{ padding: '5px 10px', fontSize: 11 }} onClick={() => addLibraryTemplate(lib)} data-testid={`library-use-${lib.name}`} title="Add this template to your WhatsApp account"><Ico.plus /> Add to my account</button>
+                              </div>
+                            </div>
+                            <b>{lib.friendly_name || lib.name}</b>
+                            <div className="bubble">
+                              {((lib.meta_payload?.components || []).find((c) => (c.type || '').toUpperCase() === 'BODY')?.text) || lib.description || ''}
+                            </div>
+                            <div className="status"><Ico.clock /> {(lib.lang_code || 'en_US')} · {lib.description || 'Standard template'}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="card" style={{marginTop:18, background:'var(--wa-bg)', borderColor:'#CDEBD9'}}>
@@ -938,8 +1117,7 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
               </div>
             </div>
           </div>
-          <LoyaltySlabsCard salonId={salonId} authHeaders={authHeaders} />
-          <LoyaltyPointsCard salonId={salonId} authHeaders={authHeaders} />
+          <LoyaltyProgramCard salonId={salonId} authHeaders={authHeaders} />
         </div>
       )}
 
@@ -1017,6 +1195,60 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
         initial={editingPlan}
         onSaved={() => { setMembershipDrawer(false); setEditingPlan(null); fetchAll(); }}
       />
+      {previewLib && <LibraryPreviewModal lib={previewLib} onClose={() => setPreviewLib(null)} onAdd={() => { addLibraryTemplate(previewLib); setPreviewLib(null); }} />}
+    </div>
+  );
+}
+
+// -------------------- Part 2B: Library template preview modal --------------------
+function LibraryPreviewModal({ lib, onClose, onAdd }) {
+  const comps = lib?.meta_payload?.components || [];
+  const header = comps.find(c => (c.type || '').toUpperCase() === 'HEADER');
+  const body = comps.find(c => (c.type || '').toUpperCase() === 'BODY');
+  const footer = comps.find(c => (c.type || '').toUpperCase() === 'FOOTER');
+  const buttons = (comps.find(c => (c.type || '').toUpperCase() === 'BUTTONS')?.buttons) || [];
+  // Fill body {{n}} with the sample example values so it previews like WhatsApp.
+  const examples = (body?.example?.body_text || [])[0] || [];
+  let bodyText = body?.text || '';
+  examples.forEach((v, i) => { bodyText = bodyText.replace(new RegExp(`\\{\\{${i + 1}\\}\\}`, 'g'), v); });
+  const headerFmt = (header?.format || 'TEXT').toUpperCase();
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(20,16,40,.45)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} data-testid="library-preview-modal">
+      <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 16, width: 'min(440px, 96vw)', maxHeight: '88vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,.25)' }}>
+        <div style={{ padding: '16px 18px', borderBottom: '1px solid var(--line,#eeecf7)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <b style={{ fontSize: 15 }}>{lib.friendly_name || lib.name}</b>
+          <button className="btn-ghost" onClick={onClose} style={{ padding: '4px 8px' }}>✕</button>
+        </div>
+        <div style={{ padding: 18 }}>
+          {/* WhatsApp-style bubble */}
+          <div style={{ background: 'var(--wa-bg,#e7f6ed)', border: '1px solid #CDEBD9', borderRadius: 12, padding: 12 }}>
+            {header && headerFmt !== 'TEXT' && (
+              <div style={{ background: '#fff', border: '1px dashed #c9cdd6', borderRadius: 8, padding: '18px 12px', textAlign: 'center', fontSize: 12, color: 'var(--muted,#6b6489)', marginBottom: 8 }}>
+                📎 {headerFmt} attachment (sample)
+              </div>
+            )}
+            {header && headerFmt === 'TEXT' && <div style={{ fontWeight: 800, marginBottom: 6 }}>{header.text}</div>}
+            <div style={{ fontSize: 13.5, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{bodyText}</div>
+            {footer && <div style={{ fontSize: 11, color: 'var(--muted,#6b6489)', marginTop: 8 }}>{footer.text}</div>}
+          </div>
+          {buttons.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+              {buttons.map((b, i) => (
+                <div key={i} style={{ textAlign: 'center', color: 'var(--sky,#2f7bd8)', fontWeight: 700, fontSize: 13, border: '1px solid var(--line,#eeecf7)', borderRadius: 8, padding: '9px' }}>
+                  {b.type === 'URL' ? '🔗 ' : b.type === 'PHONE_NUMBER' ? '📞 ' : '💬 '}{b.text}
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ fontSize: 11.5, color: 'var(--muted,#6b6489)', marginTop: 12 }}>
+            {(lib.lang_code || 'en_US')} · {(lib.category || 'UTILITY').toString().toUpperCase()} · {lib.description || ''}
+          </div>
+        </div>
+        <div style={{ padding: '14px 18px', borderTop: '1px solid var(--line,#eeecf7)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button className="btn-ghost" onClick={onClose}>Close</button>
+          <button className="btn-primary" onClick={onAdd} data-testid="library-preview-add"><Ico.plus /> Add to my account</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1563,6 +1795,16 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
   });
   const [saving, setSaving] = useState(false);
   const [submittingId, setSubmittingId] = useState(null);
+  // Part 2C — header / footer / buttons
+  const [headerType, setHeaderType] = useState('none');       // none | text | media
+  const [headerText, setHeaderText] = useState('');
+  const [headerFormat, setHeaderFormat] = useState('IMAGE');  // IMAGE | VIDEO | DOCUMENT
+  const [headerSampleUrl, setHeaderSampleUrl] = useState('');
+  const [footerText, setFooterText] = useState('');
+  const [buttons, setButtons] = useState([]);                 // [{type, text, url?, phone?, sample?}]
+  const addButton = (type) => setButtons((b) => b.length >= 3 ? b : [...b, type === 'QUICK_REPLY' ? { type, text: '' } : type === 'PHONE_NUMBER' ? { type, text: '', phone: '' } : { type: 'URL', text: '', url: '', sample: '' }]);
+  const setBtn = (i, k, v) => setButtons((b) => b.map((x, idx) => idx === i ? { ...x, [k]: v } : x));
+  const rmBtn = (i) => setButtons((b) => b.filter((_, idx) => idx !== i));
 
   // Placeholders detected in the current body ({{1}}, {{2}}, …)
   const placeholders = useMemo(() => {
@@ -1575,6 +1817,8 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
     if (!open) {
       setName(''); setCategory('utility'); setLangCode('en');
       setBody(DEFAULT_BODY);
+      setHeaderType('none'); setHeaderText(''); setHeaderFormat('IMAGE'); setHeaderSampleUrl('');
+      setFooterText(''); setButtons([]);
       setVarMap({
         1: { key: 'customer_name', sample: 'Priya' },
         2: { key: 'token_number',  sample: 'M12' },
@@ -1589,6 +1833,12 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
       setCategory(String(initial.category || 'utility').toLowerCase());
       setLangCode(initial.lang_code || 'en');
       setBody(initial.body || '');
+      setHeaderText(initial.header_text || '');
+      setHeaderType(initial.header_text ? 'text' : (initial.header_format ? 'media' : 'none'));
+      setHeaderFormat(initial.header_format || 'IMAGE');
+      setHeaderSampleUrl(initial.header_sample_url || '');
+      setFooterText(initial.footer_text || '');
+      setButtons(Array.isArray(initial.buttons) ? initial.buttons : []);
       // Rebuild varMap from example_values + variables_meta if present
       const nextMap = {};
       const ex = initial.example_values || {};
@@ -1675,6 +1925,11 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
           category,
           lang_code: langCode,
           body,
+          header_text: headerType === 'text' ? (headerText || null) : null,
+          header_format: headerType === 'media' ? headerFormat : null,
+          header_sample_url: headerType === 'media' ? (headerSampleUrl || null) : null,
+          footer_text: footerText || null,
+          buttons: buttons.length ? buttons.filter(b => (b.text || '').trim()) : null,
           example_values,
           // extras (backend ignores unknown fields via ConfigDict extra=ignore)
           variables_meta,
@@ -1697,25 +1952,25 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
     try {
       const res = await axios.post(
         `${API}/salons/${salonId}/marketing/templates/${draft.id}/submit`,
-        { provider: 'twilio' },
+        { provider: 'meta' },
         { headers: authHeaders() }
       );
-      toast.success(`Submitted to Twilio · Status: ${res.data?.approval_status || 'pending'}`);
+      toast.success(`Submitted for Meta approval · Status: ${res.data?.approval_status || 'pending'}`);
       onSaved?.();
     } catch (e) {
       const detail = e.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Twilio submission failed. Check TWILIO_API_KEY_SID / SECRET in backend .env.');
+      toast.error(typeof detail === 'string' ? detail : 'Meta submission failed. Ask the platform owner to finish connecting your WhatsApp number.');
     } finally { setSubmittingId(null); }
   };
 
   return (
-    <Drawer open={open} onClose={onClose} title={initial && initial.id ? 'Edit WhatsApp Template' : 'New WhatsApp Template'} subtitle="Body + variables · sent to Twilio for Meta approval" iconFn={Ico.chat}
+    <Drawer open={open} onClose={onClose} title={initial && initial.id ? 'Edit WhatsApp Template' : 'New WhatsApp Template'} subtitle="Body + variables · sent to Meta for approval" iconFn={Ico.chat}
       footer={
         <>
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
           <button className="btn-ghost" disabled={saving || submittingId} onClick={saveDraft}>{saving ? 'Saving…' : 'Save draft'}</button>
           <button className="btn-primary" disabled={saving || submittingId} onClick={saveAndSubmit}>
-            <Ico.check /> {submittingId ? 'Submitting…' : 'Save & submit to Twilio'}
+            <Ico.check /> {submittingId ? 'Submitting…' : 'Save & submit to Meta'}
           </button>
         </>
       }
@@ -1741,6 +1996,56 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
       <div className="v2-field"><label>Body — use {'{{1}}'}, {'{{2}}'}, {'{{3}}'} …</label>
         <textarea rows={4} value={body} onChange={(e) => setBody(e.target.value)} />
         <div style={{fontSize:11, color:'var(--muted-2)', marginTop:6}}>Detected placeholders: {placeholders.length ? placeholders.map(p => `{{${p}}}`).join(' ') : '—'}</div>
+      </div>
+
+      {/* Part 2C — Header */}
+      <div className="v2-field"><label>Header (optional)</label>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          {[['none', 'None'], ['text', 'Text'], ['media', 'Media']].map(([v, lbl]) => (
+            <button key={v} type="button" data-testid={`tpl-header-${v}`} onClick={() => setHeaderType(v)}
+              style={{ flex: 1, padding: '7px 8px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                border: `1.5px solid ${headerType === v ? '#7c3aed' : 'var(--line,#e0dbe8)'}`,
+                color: headerType === v ? '#7c3aed' : 'var(--muted,#6b6489)', background: headerType === v ? '#7c3aed1A' : '#fff' }}>{lbl}</button>
+          ))}
+        </div>
+        {headerType === 'text' && (
+          <input placeholder="Header text (e.g. Your invoice is ready)" value={headerText} onChange={(e) => setHeaderText(e.target.value)} data-testid="tpl-header-text" />
+        )}
+        {headerType === 'media' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8 }}>
+            <select value={headerFormat} onChange={(e) => setHeaderFormat(e.target.value)} data-testid="tpl-header-format">
+              <option value="IMAGE">Image</option>
+              <option value="VIDEO">Video</option>
+              <option value="DOCUMENT">Document</option>
+            </select>
+            <input placeholder="Sample media URL (for Meta review)" value={headerSampleUrl} onChange={(e) => setHeaderSampleUrl(e.target.value)} data-testid="tpl-header-media-url" />
+          </div>
+        )}
+      </div>
+
+      {/* Part 2C — Footer */}
+      <div className="v2-field"><label>Footer (optional, max 60 chars)</label>
+        <input maxLength={60} placeholder="e.g. Powered by SalonHub" value={footerText} onChange={(e) => setFooterText(e.target.value)} data-testid="tpl-footer-text" />
+      </div>
+
+      {/* Part 2C — Buttons */}
+      <div className="v2-field"><label>Buttons (optional, up to 3)</label>
+        {buttons.map((b, i) => (
+          <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }} data-testid={`tpl-button-row-${i}`}>
+            <span style={{ fontSize: 11, fontWeight: 700, minWidth: 78, color: 'var(--muted,#6b6489)' }}>{b.type === 'QUICK_REPLY' ? 'Quick reply' : b.type === 'PHONE_NUMBER' ? 'Call' : 'URL'}</span>
+            <input placeholder="Button text" value={b.text} onChange={(e) => setBtn(i, 'text', e.target.value)} style={{ flex: 1 }} />
+            {b.type === 'URL' && <input placeholder="https://…/{{1}}" value={b.url || ''} onChange={(e) => setBtn(i, 'url', e.target.value)} style={{ flex: 1 }} />}
+            {b.type === 'PHONE_NUMBER' && <input placeholder="+9198…" value={b.phone || ''} onChange={(e) => setBtn(i, 'phone', e.target.value)} style={{ flex: 1 }} />}
+            <button type="button" className="btn-ghost" style={{ padding: '4px 8px' }} onClick={() => rmBtn(i)}>✕</button>
+          </div>
+        ))}
+        {buttons.length < 3 && (
+          <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <button type="button" className="btn-ghost" style={{ fontSize: 11 }} onClick={() => addButton('QUICK_REPLY')} data-testid="tpl-add-quickreply">+ Quick reply</button>
+            <button type="button" className="btn-ghost" style={{ fontSize: 11 }} onClick={() => addButton('URL')} data-testid="tpl-add-url">+ URL</button>
+            <button type="button" className="btn-ghost" style={{ fontSize: 11 }} onClick={() => addButton('PHONE_NUMBER')} data-testid="tpl-add-phone">+ Call</button>
+          </div>
+        )}
       </div>
 
       {/* Variable → app data mapping */}
@@ -1793,9 +2098,111 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
   );
 }
 
-// -------------------- Card: Loyalty spend slabs (earn-to-wallet/points) --------------------
-function LoyaltySlabsCard({ salonId, authHeaders }) {
+// -------------------- Part 1: WhatsApp connect card (Embedded Signup + Manual) --------------------
+function WhatsAppConnectCard({ waConn, waBusy, onEmbedded, onManual, onDisconnect }) {
+  const [showManual, setShowManual] = useState(false);
+  const [f, setF] = useState({ waba_id: '', phone_number_id: '', access_token: '', sender_phone_e164: '', display_name: '' });
+  const set = (k, v) => setF(s => ({ ...s, [k]: v }));
+  const connected = !!waConn?.waba_id;
+  const submit = async () => {
+    if (!f.waba_id || !f.phone_number_id || !f.access_token) { toast.error('WABA ID, Phone Number ID and Access token are required'); return; }
+    const ok = await onManual(f);
+    if (ok) setShowManual(false);
+  };
+  return (
+    <div className="card" style={{ marginBottom: 16 }} data-testid="wa-connect-card">
+      <div className="card__h">
+        <div className="t"><span style={{ color: 'var(--wa)' }}><Ico.wa /></span> WhatsApp Business connection</div>
+        {connected && <span className="cstat running">{waConn.mock ? 'Connected (MOCK)' : (waConn.verified ? 'Verified' : 'Connected')}</span>}
+      </div>
+      {connected ? (
+        <div>
+          <div style={{ fontSize: 12.5, color: 'var(--ink-soft)', lineHeight: 1.6, marginBottom: 10 }}>
+            Number: <b>{waConn.sender_phone_e164 || waConn.phone_number_id}</b>{waConn.display_name ? ` · ${waConn.display_name}` : ''}<br />
+            WABA <code>{waConn.waba_id}</code> · via {waConn.connected_via || 'embedded_signup'}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button className="btn-ghost" onClick={onEmbedded} disabled={waBusy}><Ico.wa /> Reconnect</button>
+            <button className="btn-ghost" style={{ color: 'var(--rose,#e11d48)' }} onClick={onDisconnect} data-testid="wa-disconnect-btn"><Ico.trash /> Disconnect</button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', lineHeight: 1.5, margin: '0 0 12px' }}>
+            Connect your own WhatsApp number so messages send from your salon.
+          </p>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button className="btn-primary" onClick={onEmbedded} disabled={waBusy} data-testid="wa-connect-btn"><Ico.wa /> {waBusy ? 'Connecting…' : 'Connect via Embedded Signup'}</button>
+            <button className="btn-ghost" onClick={() => setShowManual(s => !s)} data-testid="wa-manual-toggle">{showManual ? 'Hide manual form' : 'Connect manually'}</button>
+          </div>
+          {showManual && (
+            <div style={{ marginTop: 14, borderTop: '1px solid var(--line,#eeecf7)', paddingTop: 14 }} data-testid="wa-manual-form">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div className="v2-field"><label>WABA ID *</label><input value={f.waba_id} onChange={e => set('waba_id', e.target.value)} data-testid="wa-manual-waba" /></div>
+                <div className="v2-field"><label>Phone Number ID *</label><input value={f.phone_number_id} onChange={e => set('phone_number_id', e.target.value)} data-testid="wa-manual-phoneid" /></div>
+                <div className="v2-field" style={{ gridColumn: '1 / -1' }}><label>Access token *</label><input value={f.access_token} onChange={e => set('access_token', e.target.value)} data-testid="wa-manual-token" /></div>
+                <div className="v2-field"><label>Sender phone (E.164)</label><input value={f.sender_phone_e164} onChange={e => set('sender_phone_e164', e.target.value)} placeholder="+9198…" /></div>
+                <div className="v2-field"><label>Display name</label><input value={f.display_name} onChange={e => set('display_name', e.target.value)} /></div>
+              </div>
+              <button className="btn-primary" style={{ marginTop: 12 }} onClick={submit} disabled={waBusy} data-testid="wa-manual-submit"><Ico.check /> {waBusy ? 'Connecting…' : 'Connect manually'}</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// -------------------- Part 2D: Event templates panel --------------------
+function EventTemplatesPanel({ salonId, authHeaders }) {
+  const [data, setData] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const EVENT_LABELS = { invoice: 'Invoice', booking_confirmation: 'Booking confirmation', queue_followup: 'Queue follow-up', reminder: 'Reminder' };
+  const load = useCallback(() => {
+    if (!salonId) return;
+    axios.get(`${API}/salons/${salonId}/marketing/settings/event-templates`, { headers: authHeaders() })
+      .then(r => setData(r.data)).catch(() => setData({ events: [], salon_event_templates: {}, templates: [] }));
+  }, [salonId, authHeaders]);
+  useEffect(() => { load(); }, [load]);
+  if (!data) return null;
+  const setEvt = (ev, name) => setData(d => ({ ...d, salon_event_templates: { ...(d.salon_event_templates || {}), [ev]: name } }));
+  const save = async () => {
+    setSaving(true);
+    try {
+      await axios.put(`${API}/salons/${salonId}/marketing/settings/event-templates`, data.salon_event_templates || {}, { headers: authHeaders() });
+      toast.success('Event templates saved');
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Save failed'); }
+    finally { setSaving(false); }
+  };
+  const events = (data.events && data.events.length) ? data.events : ['invoice', 'booking_confirmation', 'queue_followup', 'reminder'];
+  const templates = data.templates || [];
+  return (
+    <div className="card" style={{ marginTop: 18 }} data-testid="event-templates-panel">
+      <div className="card__h"><div className="t"><Ico.bolt /> Event templates</div></div>
+      <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 12px', lineHeight: 1.6 }}>
+        Choose which of your approved templates fires for each app event. Falls back to the default when unset.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {events.map(ev => (
+          <div key={ev} style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 13, fontWeight: 700 }}>{EVENT_LABELS[ev] || ev}</span>
+            <select value={(data.salon_event_templates || {})[ev] || ''} onChange={e => setEvt(ev, e.target.value)} data-testid={`event-tpl-${ev}`}
+              style={{ minWidth: 240, fontSize: 12.5, padding: '7px 9px', borderRadius: 8, border: '1px solid var(--line,#e0dbe8)' }}>
+              <option value="">— Default —</option>
+              {templates.map(t => <option key={t.name} value={t.name}>{(t.friendly_name || t.name)}{t.meta_status ? ` (${t.meta_status})` : ''}</option>)}
+            </select>
+          </div>
+        ))}
+      </div>
+      <button className="btn-primary" style={{ marginTop: 14 }} disabled={saving} onClick={save} data-testid="event-tpl-save"><Ico.check /> {saving ? 'Saving…' : 'Save event templates'}</button>
+    </div>
+  );
+}
+
+// -------------------- Card: Loyalty program (points-per-visit + spend slabs, merged) --------------------
+function LoyaltyProgramCard({ salonId, authHeaders }) {
   const [prog, setProg] = useState(null);
+  const [pts, setPts] = useState({ points_earn_per_100: 10, points_redeem_rate: 10, points_min_redeem: 100 });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -1807,6 +2214,13 @@ function LoyaltySlabsCard({ salonId, authHeaders }) {
         credit_destination: r.data?.credit_destination || 'wallet',
       }))
       .catch(() => setProg({ enabled: false, tiers: [], credit_destination: 'wallet' }));
+    axios.get(`${API}/salons/${salonId}/loyalty-points-config`, { headers: authHeaders() })
+      .then(r => setPts({
+        points_earn_per_100: r.data?.points_earn_per_100 ?? 10,
+        points_redeem_rate: r.data?.points_redeem_rate ?? 10,
+        points_min_redeem: r.data?.points_min_redeem ?? 100,
+      }))
+      .catch(() => {});
   }, [salonId, authHeaders]);
 
   if (!prog) return null;
@@ -1814,6 +2228,8 @@ function LoyaltySlabsCard({ salonId, authHeaders }) {
   const setTier = (i, k, v) => setProg(p => ({ ...p, tiers: p.tiers.map((t, idx) => idx === i ? { ...t, [k]: v } : t) }));
   const addTier = () => setProg(p => ({ ...p, tiers: [...p.tiers, { name: `Slab ${p.tiers.length + 1}`, spend_amount: 15000, period_months: 6, topup_percentage: 8 }] }));
   const removeTier = (i) => setProg(p => ({ ...p, tiers: p.tiers.filter((_, idx) => idx !== i) }));
+
+  const setPtsField = (k, v) => setPts(p => ({ ...p, [k]: v }));
 
   const save = async () => {
     setSaving(true);
@@ -1829,30 +2245,38 @@ function LoyaltySlabsCard({ salonId, authHeaders }) {
           topup_percentage: Number(t.topup_percentage) || 0,
         })),
       };
+      // Points-per-visit config — enabled state mirrors the master toggle so the
+      // whole loyalty section turns on/off together (and gates the invoice print).
+      await axios.put(`${API}/salons/${salonId}/loyalty-points-config`, {
+        points_enabled: prog.enabled,
+        points_earn_per_100: Number(pts.points_earn_per_100) || 0,
+        points_redeem_rate: Number(pts.points_redeem_rate) || 10,
+        points_min_redeem: Number(pts.points_min_redeem) || 0,
+      }, { headers: authHeaders() });
       const r = await axios.post(`${API}/salons/${salonId}/loyalty-program`, payload, { headers: authHeaders() });
       setProg({ enabled: !!r.data?.enabled, tiers: r.data?.tiers || [], credit_destination: r.data?.credit_destination || 'wallet' });
-      toast.success('Loyalty slabs saved');
+      toast.success('Loyalty program saved');
     } catch (e) {
       toast.error(e.response?.data?.detail || 'Save failed');
     } finally { setSaving(false); }
   };
 
   return (
-    <div className="card" data-testid="loyalty-slabs-card">
+    <div className="card" data-testid="loyalty-program-card">
       <div className="card__h">
-        <div className="t"><Ico.trending /> Loyalty spend slabs</div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }} data-testid="loyalty-slabs-enabled-toggle">
-          <input type="checkbox" checked={!!prog.enabled} onChange={(e) => setProg(p => ({ ...p, enabled: e.target.checked }))} />
+        <div className="t"><Ico.trending /> Loyalty program</div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }} data-testid="loyalty-enabled-toggle">
+          <input type="checkbox" checked={!!prog.enabled} onChange={(e) => setProg(p => ({ ...p, enabled: e.target.checked }))} data-testid="loyalty-slabs-enabled-toggle" />
           {prog.enabled ? 'Enabled' : 'Disabled'}
         </label>
       </div>
       <p style={{ fontSize: 12.5, color: 'var(--muted,#6b6489)', margin: '0 0 12px' }}>
-        When a guest's spend crosses a slab within its period, they earn that % back as credit. Slabs reset every period. Loyalty is an earning perk — not a checkout discount.
+        Reward loyal guests two ways — points earned on every paid visit, and bonus credit when spend crosses a slab within its period. Loyalty is an earning perk, not a checkout discount. When the program is disabled nothing prints on the invoice and existing balances stay with the guest.
       </p>
 
-      <div className="v2-field"><label>Where do earned credits land?</label>
+      <div className="v2-field"><label>Where do earned points &amp; credits land?</label>
         <div style={{ display: 'flex', gap: 8 }}>
-          {[['wallet', 'Wallet balance'], ['points', 'Loyalty points']].map(([v, lbl]) => (
+          {[['wallet', 'Cash wallet'], ['points', 'Points wallet']].map(([v, lbl]) => (
             <button key={v} type="button" data-testid={`loyalty-destination-${v}`}
               onClick={() => setProg(p => ({ ...p, credit_destination: v }))}
               style={{ flex: 1, padding: '9px 10px', borderRadius: 10, fontSize: 12.5, fontWeight: 700, cursor: 'pointer',
@@ -1862,10 +2286,32 @@ function LoyaltySlabsCard({ salonId, authHeaders }) {
           ))}
         </div>
         <div style={{ fontSize: 11, color: 'var(--muted,#6b6489)', marginTop: 6 }}>
-          Points convert to wallet, and wallet is used as a payment mode at checkout.
+          Cash wallet is spendable at checkout. Points convert to wallet at the rate below.
         </div>
       </div>
 
+      {/* ---- Points per visit ---- */}
+      <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line,#eeecf7)' }}>
+        <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}><Ico.bolt /> Points per visit</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+          <div className="v2-field"><label>Earn — points / ₹100</label>
+            <input type="number" min="0" step="0.5" value={pts.points_earn_per_100} onChange={(e) => setPtsField('points_earn_per_100', Number(e.target.value))} data-testid="loyalty-earn-input" />
+          </div>
+          <div className="v2-field"><label>Redeem — points / ₹1</label>
+            <input type="number" min="1" step="1" value={pts.points_redeem_rate} onChange={(e) => setPtsField('points_redeem_rate', Number(e.target.value))} data-testid="loyalty-redeem-rate-input" />
+          </div>
+          <div className="v2-field"><label>Min points to redeem</label>
+            <input type="number" min="0" step="10" value={pts.points_min_redeem} onChange={(e) => setPtsField('points_min_redeem', Number(e.target.value))} data-testid="loyalty-min-redeem-input" />
+          </div>
+        </div>
+        <div style={{ background: 'var(--surface-2,#f7f6fc)', border: '1px solid var(--line,#eeecf7)', borderRadius: 10, padding: '10px 12px', fontSize: 12.5, color: 'var(--muted,#6b6489)', margin: '4px 0 0' }}>
+          Example: spend ₹1000 → earn <b>{Math.round(10 * (pts.points_earn_per_100 || 0))} pts</b>. {pts.points_redeem_rate} pts = ₹1, so {pts.points_min_redeem} pts = <b>₹{(pts.points_min_redeem / (pts.points_redeem_rate || 1)).toFixed(2)}</b>{prog.credit_destination === 'wallet' ? ' credited straight to the cash wallet.' : '.'}
+        </div>
+      </div>
+
+      {/* ---- Spend slabs ---- */}
+      <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line,#eeecf7)' }}>
+        <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}><Ico.trending /> Spend slabs</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 6 }} data-testid="loyalty-slabs-list">
         {prog.tiers.length === 0 && <div className="placeholder"><b>No slabs yet</b><p>Add a spend threshold to reward loyal guests.</p></div>}
         {prog.tiers.map((t, i) => (
@@ -1893,71 +2339,17 @@ function LoyaltySlabsCard({ salonId, authHeaders }) {
         ))}
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <button className="btn-ghost" data-testid="loyalty-slab-add-btn" onClick={addTier}><Ico.plus /> Add slab</button>
-        <button className="btn-primary" data-testid="loyalty-slabs-save-btn" disabled={saving} onClick={save}><Ico.check /> {saving ? 'Saving…' : 'Save slabs'}</button>
+        <div style={{ marginTop: 12 }}>
+          <button className="btn-ghost" data-testid="loyalty-slab-add-btn" onClick={addTier}><Ico.plus /> Add slab</button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line,#eeecf7)' }}>
+        <button className="btn-primary" data-testid="loyalty-save-btn" disabled={saving} onClick={save}><Ico.check /> {saving ? 'Saving…' : 'Save loyalty program'}</button>
       </div>
     </div>
   );
 }
-
-// -------------------- Card: Loyalty points program config --------------------
-function LoyaltyPointsCard({ salonId, authHeaders }) {
-  const [cfg, setCfg] = useState(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!salonId) return;
-    axios.get(`${API}/salons/${salonId}/loyalty-points-config`)
-      .then(r => setCfg(r.data))
-      .catch(() => setCfg({ points_enabled: false, points_earn_per_100: 10, points_redeem_rate: 10, points_min_redeem: 100 }));
-  }, [salonId]);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const r = await axios.put(`${API}/salons/${salonId}/loyalty-points-config`, cfg, { headers: authHeaders() });
-      setCfg(r.data);
-      toast.success('Loyalty program saved');
-    } catch (e) {
-      toast.error(e.response?.data?.detail || 'Save failed');
-    } finally { setSaving(false); }
-  };
-
-  if (!cfg) return null;
-  const set = (k, v) => setCfg(c => ({ ...c, [k]: v }));
-
-  return (
-    <div className="card" data-testid="loyalty-points-config-card">
-      <div className="card__h">
-        <div className="t"><Ico.bolt /> Loyalty points program</div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }} data-testid="loyalty-enabled-toggle">
-          <input type="checkbox" checked={!!cfg.points_enabled} onChange={(e) => set('points_enabled', e.target.checked)} />
-          {cfg.points_enabled ? 'Enabled' : 'Disabled'}
-        </label>
-      </div>
-      <p style={{ fontSize: 12.5, color: 'var(--muted,#6b6489)', margin: '0 0 12px' }}>
-        Guests earn points on every paid visit and can convert them to wallet balance at checkout.
-      </p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
-        <div className="v2-field"><label>Earn — points / ₹100</label>
-          <input type="number" min="0" step="0.5" value={cfg.points_earn_per_100} onChange={(e) => set('points_earn_per_100', Number(e.target.value))} data-testid="loyalty-earn-input" />
-        </div>
-        <div className="v2-field"><label>Redeem — points / ₹1</label>
-          <input type="number" min="1" step="1" value={cfg.points_redeem_rate} onChange={(e) => set('points_redeem_rate', Number(e.target.value))} data-testid="loyalty-redeem-rate-input" />
-        </div>
-        <div className="v2-field"><label>Min points to redeem</label>
-          <input type="number" min="0" step="10" value={cfg.points_min_redeem} onChange={(e) => set('points_min_redeem', Number(e.target.value))} data-testid="loyalty-min-redeem-input" />
-        </div>
-      </div>
-      <div style={{ background: 'var(--surface-2,#f7f6fc)', border: '1px solid var(--line,#eeecf7)', borderRadius: 10, padding: '10px 12px', fontSize: 12.5, color: 'var(--muted,#6b6489)', margin: '4px 0 12px' }}>
-        Example: spend ₹1000 → earn <b>{Math.round(10 * (cfg.points_earn_per_100 || 0))} pts</b>. {cfg.points_redeem_rate} pts = ₹1, so {cfg.points_min_redeem} pts = <b>₹{(cfg.points_min_redeem / (cfg.points_redeem_rate || 1)).toFixed(2)}</b>.
-      </div>
-      <button className="btn-primary" disabled={saving} onClick={save} data-testid="loyalty-save-btn"><Ico.check /> {saving ? 'Saving…' : 'Save loyalty program'}</button>
-    </div>
-  );
-}
-
 
 // -------------------- Drawer: New/Edit Membership plan (Marketing → Offers & Perks) --------------------
 function NewMembershipDrawer({ open, onClose, salonId, authHeaders, initial, onSaved }) {

@@ -41,8 +41,9 @@ from twilio_service import (
     format_salon_calling,
 )
 
-# Import invoice service
-from invoice_service import generate_invoice_pdf
+# Import invoice service — Phase 4: the legacy ReportLab generator
+# (invoice_service.generate_invoice_pdf) is retired from all customer-facing
+# paths; the invoice PDF is now rendered from the same HTML as /view.
 from invoice_html import (
     resolve_invoice_settings,
     render_invoice_html,
@@ -82,6 +83,14 @@ client = AsyncIOMotorClient(
     compressors="zstd,zlib",  # smaller payloads over the wire
 )
 db = client[os.environ['DB_NAME']]
+
+# Phase 1 — wire the DB into whatsapp_service so its per-salon Meta credential
+# resolver can look up salon_channel_connections (multi-tenant sending).
+try:
+    import whatsapp_service as _wa_svc
+    _wa_svc.configure_db(db)
+except Exception as _wa_cfg_err:  # pragma: no cover
+    logging.getLogger(__name__).warning(f"whatsapp_service.configure_db failed: {_wa_cfg_err}")
 
 # JWT Configuration — fail fast if not configured (no insecure fallback).
 try:
@@ -2948,6 +2957,216 @@ async def twilio_inbound_whatsapp(request: Request):
                     media_type="application/xml")
 
 
+# ---------------------------------------------------------------------------
+# Phase 1.3 — Meta WhatsApp Cloud API webhook (multi-tenant).
+# Inbound events are keyed by the receiving number's phone_number_id; we map
+# that back to the salon via salon_channel_connections and store the reply
+# under that salon. GET verifies the subscription challenge.
+# ---------------------------------------------------------------------------
+async def _route_inbound_to_salon_by_phone_id(phone_number_id: str):
+    """Map an inbound Meta phone_number_id to its salon_id (or None)."""
+    if not phone_number_id:
+        return None
+    try:
+        conn = await db.salon_channel_connections.find_one(
+            {"provider": "meta", "phone_number_id": phone_number_id},
+            {"_id": 0, "salon_id": 1},
+        )
+        return (conn or {}).get("salon_id")
+    except Exception:
+        return None
+
+
+@api_router.get("/webhooks/whatsapp")
+async def meta_whatsapp_webhook_verify(request: Request):
+    """Meta webhook verification handshake (hub.challenge)."""
+    q = request.query_params
+    mode = q.get("hub.mode")
+    token = q.get("hub.verify_token")
+    challenge = q.get("hub.challenge")
+    expected = os.environ.get("META_WA_WEBHOOK_VERIFY_TOKEN") or os.environ.get("META_WEBHOOK_VERIFY_TOKEN")
+    if mode == "subscribe" and expected and token == expected:
+        try:
+            return Response(content=str(int(challenge)), media_type="text/plain")
+        except Exception:
+            return Response(content=str(challenge or ""), media_type="text/plain")
+    raise HTTPException(status_code=403, detail="Webhook verification failed")
+
+
+@api_router.post("/webhooks/whatsapp")
+async def meta_whatsapp_webhook(request: Request):
+    """Receive Meta Cloud API events for ALL salons. Routes each event to the
+    salon that owns the receiving phone_number_id and stores inbound messages.
+
+    Signature is soft-verified (logged, not dropped) so we never silently lose
+    events; returns 200 quickly per Meta's requirements.
+    """
+    raw = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    app_secret = os.environ.get("META_APP_SECRET") or os.environ.get("META_WA_APP_SECRET") or ""
+    if app_secret and sig:
+        try:
+            from whatsapp_service import verify_meta_signature
+            if not verify_meta_signature(app_secret, raw, sig):
+                logger.warning("[meta-wa] signature mismatch (processing anyway)")
+        except Exception:
+            pass
+
+    try:
+        payload = json.loads(raw.decode("utf-8") or "{}")
+    except Exception:
+        return {"received": True}
+
+    now = datetime.now(timezone.utc).isoformat()
+    for entry in (payload.get("entry") or []):
+        for change in (entry.get("changes") or []):
+            value = change.get("value") or {}
+            meta_md = value.get("metadata") or {}
+            phone_number_id = meta_md.get("phone_number_id")
+            salon_id = await _route_inbound_to_salon_by_phone_id(phone_number_id)
+            contacts = value.get("contacts") or []
+            profile_name = ""
+            if contacts:
+                profile_name = ((contacts[0] or {}).get("profile") or {}).get("name") or ""
+            for msg in (value.get("messages") or []):
+                msg_id = msg.get("id")
+                from_wa = msg.get("from") or ""
+                mtype = msg.get("type")
+                text_body = ""
+                if mtype == "text":
+                    text_body = ((msg.get("text") or {}).get("body")) or ""
+                elif mtype == "button":
+                    text_body = ((msg.get("button") or {}).get("text")) or ""
+                elif mtype == "interactive":
+                    inter = msg.get("interactive") or {}
+                    text_body = (((inter.get("button_reply") or {}).get("title"))
+                                 or ((inter.get("list_reply") or {}).get("title")) or "")
+                else:
+                    text_body = f"[{mtype or 'message'}]"
+                # De-dupe on Meta message id.
+                if msg_id:
+                    try:
+                        if await db.whatsapp_messages.find_one({"message_sid": msg_id}, {"_id": 1}):
+                            continue
+                    except Exception:
+                        pass
+                e164 = "+" + re.sub(r"\D", "", from_wa) if from_wa else ""
+                doc = {
+                    "id": str(uuid.uuid4()),
+                    "salon_id": salon_id,
+                    "customer_phone": e164 or from_wa,
+                    "customer_name": profile_name or "Guest",
+                    "direction": "in",
+                    "text": text_body,
+                    "channel": "whatsapp",
+                    "provider": "meta",
+                    "kind": "message",
+                    "status": "received",
+                    "read": False,
+                    "message_sid": msg_id,
+                    "wa_id": _last10(from_wa),
+                    "to_number": phone_number_id,
+                    "created_at": now,
+                }
+                try:
+                    await db.whatsapp_messages.insert_one(doc)
+                    logger.info(f"[meta-wa] stored inbound from {e164} -> salon={salon_id} id={msg_id}")
+                except Exception as e:
+                    logger.warning(f"[meta-wa] insert failed: {e}")
+    return {"received": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.2 — Platform template LIBRARY (owner-maintained, salons can read/use).
+# platform_template_library docs: {id, name, friendly_name, category, lang_code,
+#   description, auto_provision, meta_payload:{name,category,language,components}}
+# ---------------------------------------------------------------------------
+class PlatformTemplateIn(BaseModel):
+    name: str
+    friendly_name: Optional[str] = None
+    category: str = "utility"
+    lang_code: str = "en_US"
+    description: Optional[str] = None
+    auto_provision: bool = True
+    enabled_for_salons: bool = True
+    group: Optional[str] = "marketing"  # invoice|booking|queue_followup|reminder|marketing
+    meta_payload: Dict[str, Any]
+
+
+def _require_platform_owner(admin: dict):
+    if not (admin and admin.get("is_owner")):
+        raise HTTPException(status_code=403, detail="Platform owner access required")
+    return admin
+
+
+@api_router.get("/platform/template-library")
+async def list_platform_template_library(only_enabled: bool = False,
+                                         current_user=Depends(get_current_salon_user)):
+    """List library templates — readable by any authenticated salon (and owner).
+    Pass only_enabled=true (salon-facing library) to return just the samples the
+    owner has marked visible to salons."""
+    q = {"enabled_for_salons": True} if only_enabled else {}
+    items = await db.platform_template_library.find(q, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return {"templates": items}
+
+
+@api_router.post("/platform/template-library")
+async def create_platform_template(body: PlatformTemplateIn,
+                                   admin=Depends(platform_admin_mod.get_current_platform_admin)):
+    _require_platform_owner(admin)
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": body.name,
+        "friendly_name": body.friendly_name or body.name,
+        "category": body.category,
+        "lang_code": body.lang_code,
+        "description": body.description or "",
+        "auto_provision": bool(body.auto_provision),
+        "enabled_for_salons": bool(body.enabled_for_salons),
+        "group": body.group or "marketing",
+        "meta_payload": body.meta_payload,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.platform_template_library.insert_one(dict(doc))
+    doc.pop("_id", None)
+    return {"ok": True, "template": doc}
+
+
+@api_router.put("/platform/template-library/{lib_id}")
+async def update_platform_template(lib_id: str, body: PlatformTemplateIn,
+                                   admin=Depends(platform_admin_mod.get_current_platform_admin)):
+    _require_platform_owner(admin)
+    updates = {
+        "name": body.name,
+        "friendly_name": body.friendly_name or body.name,
+        "category": body.category,
+        "lang_code": body.lang_code,
+        "description": body.description or "",
+        "auto_provision": bool(body.auto_provision),
+        "enabled_for_salons": bool(body.enabled_for_salons),
+        "group": body.group or "marketing",
+        "meta_payload": body.meta_payload,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    r = await db.platform_template_library.update_one({"id": lib_id}, {"$set": updates})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Library template not found")
+    return {"ok": True, "id": lib_id, **updates}
+
+
+@api_router.delete("/platform/template-library/{lib_id}")
+async def delete_platform_template(lib_id: str,
+                                   admin=Depends(platform_admin_mod.get_current_platform_admin)):
+    _require_platform_owner(admin)
+    r = await db.platform_template_library.delete_one({"id": lib_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Library template not found")
+    return {"ok": True, "deleted": lib_id}
+
+
+
 
 
 async def send_booking_notification(token_data: dict, notification_type: str):
@@ -3228,6 +3447,21 @@ async def check_and_notify_nearby_tokens(salon_id: str, barber_id: str, date: st
         logger.error(f"Failed to check nearby tokens: {str(e)}")
 
 
+async def _event_template(salon_id: str, event: str, default_name: str) -> str:
+    """Return the salon's chosen approved template name for an app event
+    (invoice / booking_confirmation / queue_followup / reminder), falling back
+    to the provided default when the salon hasn't bound one."""
+    try:
+        s = await db.marketing_settings.find_one(
+            {"salon_id": salon_id}, {"_id": 0, "salon_event_templates": 1}) or {}
+        chosen = (s.get("salon_event_templates") or {}).get(event)
+        if chosen:
+            return chosen
+    except Exception:
+        pass
+    return default_name
+
+
 async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: str,
                                      invoice_no: str, amount) -> dict:
     """Send the invoice-delivery WhatsApp message via the Meta Cloud API template.
@@ -3254,7 +3488,9 @@ async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: 
         logger.info(f"[Meta invoice] suppressed by customer settings for {phone}")
         return {"status": "suppressed", "reason": "customer_setting_off"}
 
-    template_name = os.environ.get("META_WA_INVOICE_TEMPLATE_NAME") or "invoice_generated"
+    template_name = await _event_template(
+        salon_id, "invoice",
+        os.environ.get("META_WA_INVOICE_TEMPLATE_NAME") or "invoice_generated")
     lang_code = os.environ.get("META_WA_INVOICE_TEMPLATE_LANG") or "en_US"
     review_path_tpl = os.environ.get("META_WA_INVOICE_REVIEW_PATH") or "review/{token_id}"
 
@@ -3302,6 +3538,7 @@ async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: 
             body_params=body_params,
             header_params=header_params,
             button_params=button_params,
+            salon_id=salon_id,
         )
     except Exception as e:
         logger.warning(f"[Meta invoice] send failed: {e}")
@@ -3488,20 +3725,39 @@ async def generate_and_send_invoice(token_id: str):
         base_url = os.getenv('REACT_APP_BACKEND_URL', 'http://localhost:8001')
         invoice_link = f"{base_url}/api/invoices/{invoice_id}/view"
 
-        # ---- Loyalty points (earn per salon config) ----
+        # ---- Loyalty (earn per salon config) — ONLY when the loyalty program is ENABLED ----
+        # When enabled, points earned land in the guest's POINTS wallet or CASH wallet
+        # depending on the salon's loyalty `credit_destination`. When disabled, nothing is
+        # printed on the invoice and any existing balances are left untouched.
         cust_phone = token.get('phone')
         pts_cfg = resolve_loyalty_points_config(salon)
-        loyalty_points = None
+        loyalty_points = None          # points to show on invoice (points destination)
+        loyalty_wallet_credit = None   # ₹ credited to cash wallet (wallet destination)
         if pts_cfg.get('points_enabled'):
             earned = int(round((grand_total / 100.0) * float(pts_cfg.get('points_earn_per_100') or 0)))
             if earned > 0 and cust_phone:
+                # Where should earned loyalty land? Read the salon loyalty program config.
+                prog = await db.loyalty_programs.find_one(
+                    {"salon_id": salon['id']}, {"_id": 0, "credit_destination": 1}) or {}
+                destination = (prog.get('credit_destination') or 'points').lower()
                 try:
-                    await _credit_loyalty_points(salon['id'], cust_phone, earned, f"Earned on invoice {invoice_no}")
+                    if destination == 'wallet':
+                        rate = float(pts_cfg.get('points_redeem_rate') or 10) or 10
+                        rupees = round(earned / rate, 2)
+                        if rupees > 0:
+                            await _credit_customer_wallet(
+                                salon['id'], cust_phone, rupees,
+                                f"Loyalty earned on invoice {invoice_no}")
+                            loyalty_wallet_credit = rupees
+                    else:
+                        await _credit_loyalty_points(
+                            salon['id'], cust_phone, earned, f"Earned on invoice {invoice_no}")
+                        loyalty_points = earned
                 except Exception:
                     pass
-            loyalty_points = earned
-        elif inv_settings.get('show_points'):
-            loyalty_points = int(round(grand_total / 100.0))
+            elif earned > 0:
+                # No phone to attribute to — still surface the earned points on the invoice.
+                loyalty_points = earned
         wallet_balance = None
         member_tier = None
         if cust_phone:
@@ -3587,6 +3843,7 @@ async def generate_and_send_invoice(token_id: str):
             "payment_mode": payment_mode_disp,
             "amount_in_words": number_to_words_inr(grand_total),
             "loyalty_points": loyalty_points,
+            "loyalty_wallet_credit": loyalty_wallet_credit,
             "wallet_balance": wallet_balance,
             "offers": offers_snapshot,
             "qr_url": qr_url,
@@ -3619,14 +3876,18 @@ async def generate_and_send_invoice(token_id: str):
             "settings": render_inv["settings"],
         }
 
-        # Generate PDF (best-effort — HTML is now the primary invoice view)
-        pdf_base64 = None
+        # Phase 4 — SINGLE invoice format. The customer PDF/attachment is now
+        # produced from the SAME HTML that powers /api/invoices/{id}/view (via
+        # headless Chrome, lazily in the /pdf endpoint). We persist that HTML now
+        # so the attachment always matches the on-screen invoice exactly. The old
+        # ReportLab layout (invoice_service.generate_invoice_pdf) is retired from
+        # every customer-facing path.
+        invoice_html_str = None
         try:
-            pdf_data = generate_invoice_pdf(invoice_data)
-            import base64
-            pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
-        except Exception as _pdf_err:
-            logger.warning(f"PDF generation skipped: {_pdf_err}")
+            invoice_html_str = render_invoice_html(render_inv)
+        except Exception as _html_err:
+            logger.warning(f"invoice HTML render skipped: {_html_err}")
+        pdf_base64 = None
 
         # Notify the customer. When WHATSAPP_PROVIDER=meta, deliver the invoice
         # through the Meta Cloud API template (PDF attachment + review button).
@@ -3645,6 +3906,7 @@ async def generate_and_send_invoice(token_id: str):
             "customer_name": token.get('customer_name'),
             "customer_phone": token.get('phone'),
             "invoice_data": invoice_data,
+            "invoice_html": invoice_html_str,
             "pdf_base64": pdf_base64,
             "amount": total,
             "sent_at": datetime.now(timezone.utc).isoformat(),
@@ -11612,6 +11874,37 @@ async def _credit_loyalty_points(salon_id: str, phone: str, delta: int, reason: 
     return new_balance
 
 
+async def _credit_customer_wallet(salon_id: str, phone: str, amount: float, reason: str, source: str = "loyalty_earn"):
+    """Credit the customer's CASH wallet (customer_wallets) + write a ledger row.
+    Returns the new wallet balance (or None when nothing was credited)."""
+    if not phone or not amount or amount <= 0:
+        return None
+    if not phone.startswith("+91"):
+        phone = f"+91{phone}"
+    now = datetime.now(timezone.utc).isoformat()
+    wallet = await db.customer_wallets.find_one({"salon_id": salon_id, "customer_phone": phone})
+    if wallet:
+        new_balance = round(float(wallet.get("wallet_balance", 0)) + amount, 2)
+        await db.customer_wallets.update_one(
+            {"salon_id": salon_id, "customer_phone": phone},
+            {"$set": {"wallet_balance": new_balance, "updated_at": now}})
+    else:
+        new_balance = round(amount, 2)
+        await db.customer_wallets.insert_one({
+            "id": str(uuid.uuid4()), "salon_id": salon_id, "customer_phone": phone,
+            "wallet_balance": new_balance, "created_at": now})
+    try:
+        await db.wallet_transactions.insert_one({
+            "id": str(uuid.uuid4()), "salon_id": salon_id, "customer_phone": phone,
+            "type": "credit", "transaction_type": "credit", "amount": round(amount, 2),
+            "balance_after": new_balance, "description": reason, "source": source,
+            "created_at": now,
+        })
+    except Exception:
+        pass
+    return new_balance
+
+
 @api_router.get("/salons/{salon_id}/loyalty-points-config")
 async def get_loyalty_points_config(salon_id: str):
     salon = await db.salons.find_one({"id": salon_id}, {"_id": 0})
@@ -11829,7 +12122,7 @@ async def send_conversation_message(salon_id: str, phone: str, body: dict = Body
     result = {"status": "failed", "provider": "twilio"}
     try:
         from whatsapp_service import send_whatsapp_message
-        result = await send_whatsapp_message(phone, text=text)
+        result = await send_whatsapp_message(phone, text=text, salon_id=salon_id)
     except Exception as e:
         logger.warning(f"[Messages] send failed: {e}")
     now = datetime.now(timezone.utc).isoformat()
@@ -15472,7 +15765,7 @@ async def send_booking_link(
     # Send via WhatsApp
     try:
         from whatsapp_service import send_whatsapp_message
-        result = await send_whatsapp_message(raw, text=message)
+        result = await send_whatsapp_message(raw, text=message, salon_id=salon_id)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"WhatsApp send failed: {exc}")
     if isinstance(result, dict) and result.get("error"):
@@ -15697,6 +15990,7 @@ async def get_customer_profile(
         "services_count": len(t.get("selected_services") or []),
         "total": float(t.get("total_amount") or t.get("total") or 0),
         "status": t.get("status"),
+        "invoice_id": t.get("invoice_id"),
     } for t in tks[:20]]
 
     # WS1 — reschedule events for this customer (shown in the history timeline)
@@ -17644,9 +17938,25 @@ async def invoice_pdf(invoice_id: str):
         except Exception:
             pdf_bytes = None
     if not pdf_bytes:
+        # Phase 4 — generate the PDF from the SAME HTML as /view (headless Chrome)
+        # so the attachment matches the on-screen invoice exactly. Cache it back
+        # onto the invoice record for subsequent fetches.
         try:
-            pdf_bytes = generate_invoice_pdf(invoice.get("invoice_data") or {})
+            from html_pdf import html_to_pdf_bytes
+            html_str = invoice.get("invoice_html")
+            if not html_str:
+                render_inv = _legacy_render_from_invoice(invoice)
+                html_str = render_invoice_html(render_inv)
+            pdf_bytes = html_to_pdf_bytes(html_str)
+            try:
+                await db.invoices.update_one(
+                    {"id": invoice_id},
+                    {"$set": {"pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8")}},
+                )
+            except Exception:
+                pass
         except Exception as _e:
+            logger.warning(f"invoice PDF (HTML->PDF) failed for {invoice_id}: {_e}")
             raise HTTPException(status_code=500, detail="Invoice PDF unavailable")
     filename = f"Invoice_{invoice.get('invoice_no', invoice_id)}.pdf"
     return Response(
@@ -18605,6 +18915,54 @@ async def staff_attendance_report(
     rows: list[dict] = []
     cur = d_start
     one_day = timedelta(days=1)
+
+    def _iso_to_dt(v):
+        if not v:
+            return None
+        try:
+            s = str(v).replace("Z", "+00:00")
+            return datetime.fromisoformat(s)
+        except Exception:
+            return None
+
+    def _sum_session_minutes(att_doc: dict):
+        """Total worked minutes summed across ALL check-in/out pairs of the day.
+        Falls back to legacy total_minutes / single check_in→check_out when no
+        sessions[] array is present. Returns (minutes|None, normalized_sessions)."""
+        sess = att_doc.get("sessions") or []
+        norm = []
+        total = 0
+        counted = False
+        for s in sess:
+            ci = s.get("ci") or s.get("check_in_at")
+            co = s.get("co") or s.get("check_out_at")
+            mins = None
+            dci, dco = _iso_to_dt(ci), _iso_to_dt(co)
+            if dci and dco and dco >= dci:
+                mins = int((dco - dci).total_seconds() // 60)
+                total += mins
+                counted = True
+            norm.append({
+                "check_in_at": ci, "check_out_at": co, "minutes": mins,
+                "ci_method": s.get("ci_method") or s.get("check_in_method"),
+                "co_method": s.get("co_method") or s.get("check_out_method"),
+            })
+        if counted:
+            return total, norm
+        # legacy fallbacks
+        if att_doc.get("total_minutes") is not None:
+            return att_doc.get("total_minutes"), norm
+        dci = _iso_to_dt(att_doc.get("check_in_at"))
+        dco = _iso_to_dt(att_doc.get("check_out_at"))
+        if dci and dco and dco >= dci:
+            m = int((dco - dci).total_seconds() // 60)
+            if not norm:
+                norm.append({"check_in_at": att_doc.get("check_in_at"),
+                             "check_out_at": att_doc.get("check_out_at"),
+                             "minutes": m, "ci_method": None, "co_method": None})
+            return m, norm
+        return None, norm
+
     while cur <= d_end:
         ds = cur.strftime("%Y-%m-%d")
         for b in barbers:
@@ -18645,6 +19003,7 @@ async def staff_attendance_report(
             else:
                 marked_by_label = "—"
 
+            worked_min, norm_sessions = _sum_session_minutes(att)
             rows.append({
                 "branch": branches_map.get(b.get("branch_id"), "—"),
                 "branch_id": b.get("branch_id"),
@@ -18653,9 +19012,10 @@ async def staff_attendance_report(
                 "staff_name": b["name"],
                 "status": status_code,
                 "leave_type": leave_label,
-                "check_in": att.get("check_in_at"),
-                "check_out": att.get("check_out_at"),
-                "worked_minutes": att.get("total_minutes"),
+                "check_in": att.get("check_in_at") or (norm_sessions[0]["check_in_at"] if norm_sessions else None),
+                "check_out": att.get("check_out_at") or (norm_sessions[-1]["check_out_at"] if norm_sessions else None),
+                "worked_minutes": worked_min,
+                "sessions": norm_sessions,
                 "half_day_reason": att.get("half_day_reason"),
                 "override_by": att.get("override_by"),
                 "override_note": att.get("override_note"),

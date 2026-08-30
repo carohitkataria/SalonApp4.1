@@ -263,6 +263,10 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
   const secondary = kpis?.secondary || {};
   const cust = kpis?.customer_count || { total: 0, by_source: { online:0, qr:0, owner:0, direct:0 } };
   const staffAtt = kpis?.staff_attendance || [];
+  // Phase 7.2 — the staff status chip reflects the salon's attendance mode.
+  const attMode = salon?.attendance_mode || 'service_completion';
+  const fmtClock = (iso) => { try { return new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
+  const isPresent = (a) => a.status === 'in' || a.status === 'out' || a.status === 'present' || !!a.check_in_at;
   const mk = kpis?.marketing_perf || { sent:0, delivered_pct:0, click_pct:0, redeemed:0, revenue:0, campaigns:[], channels:{} };
   const links = kpis?.booking_links || {};
   const targets = kpis?.targets || {};
@@ -593,7 +597,9 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
               <div className="schead">
                 <div className="lab"><I.users /> Staff Check-in</div>
                 <div className="sum">
-                  {staffAtt.filter(a => a.status === 'in').length} in · {staffAtt.filter(a => a.status === 'late').length} late
+                  {attMode === 'service_completion'
+                    ? `${staffAtt.filter(isPresent).length} present · ${staffAtt.filter(a => !isPresent(a)).length} absent`
+                    : `${staffAtt.filter(a => a.status === 'in').length} in · ${staffAtt.filter(a => a.status === 'late').length} late`}
                 </div>
               </div>
               <div style={{ overflowY: 'auto', maxHeight: 92 }}>
@@ -609,15 +615,31 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
                   return rows.map(a => (
                     <div key={a.barber_id} className="sc-row">
                       <div className="av" style={{ background: '#6C4FE0' }}>{(a.name || 'S').slice(0, 1).toUpperCase()}</div>
-                      <div className="nm">{a.name}</div>
-                      <span className={`st ${a.status}`}>{a.status}</span>
-                      <button
-                        className={`sc-btn ${a.status === 'in' ? 'out' : ''}`}
-                        onClick={() => toggleAttendance(a)}
-                        data-testid={`home-attendance-toggle-${a.barber_id}`}
-                      >
-                        {a.status === 'in' ? 'Out' : 'In'}
-                      </button>
+                      <div className="nm" style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
+                        <span>{a.name}</span>
+                        {attMode === 'geo_checkin' && (a.check_in_at || a.check_out_at) && (
+                          <span style={{ fontSize: 10, color: '#8A8F9E', fontWeight: 500 }}>
+                            {a.check_in_at ? `In ${fmtClock(a.check_in_at)}` : ''}
+                            {a.check_out_at ? `${a.check_in_at ? ' · ' : ''}Out ${fmtClock(a.check_out_at)}` : ''}
+                          </span>
+                        )}
+                      </div>
+                      {attMode === 'service_completion' ? (
+                        <span className={`st ${isPresent(a) ? 'in' : 'late'}`} title={isPresent(a) ? 'Present' : 'Absent'}>
+                          {isPresent(a) ? 'P' : 'A'}
+                        </span>
+                      ) : (
+                        <span className={`st ${a.status}`}>{a.status}</span>
+                      )}
+                      {attMode === 'geo_checkin' && (
+                        <button
+                          className={`sc-btn ${a.status === 'in' ? 'out' : ''}`}
+                          onClick={() => toggleAttendance(a)}
+                          data-testid={`home-attendance-toggle-${a.barber_id}`}
+                        >
+                          {a.status === 'in' ? 'Out' : 'In'}
+                        </button>
+                      )}
                     </div>
                   ));
                 })()}
@@ -756,9 +778,9 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
             </div>
             <div className="card">
               <div className="card__h"><div className="t"><I.trophy /> Staff Leaderboard</div></div>
-              <div>
+              <div className="shv2-scrolllist">
                 {leaderboard.length === 0 && <div style={{ fontSize: 12.5, color: '#7C8092', padding: 8 }}>No completed services yet.</div>}
-                {leaderboard.slice(0, 6).map((r, i) => (
+                {leaderboard.map((r, i) => (
                   <div key={r.barber_id} className="lb__row">
                     <div className="rank">{i + 1}</div>
                     <div className="nm">{r.barber_name}</div>
@@ -870,7 +892,7 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
             </div>
             <div className="card">
               <div className="card__h"><div className="t"><I.tag /> Top Services</div></div>
-              <div>
+              <div className="shv2-scrolllist">
                 {topSvc.length === 0 && <div style={{ fontSize: 12.5, color: '#7C8092' }}>No completed services yet.</div>}
                 {topSvc.map((s, i) => (
                   <div key={s.service_id || i} className="topsvc__row">
@@ -904,8 +926,8 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
         <button className="mobnav__item" onClick={() => goToTab?.('home')} title="Home">
           <I.home /><span>Home</span>
         </button>
-        <button className="mobnav__item" onClick={() => goRail({ route: '/salon/dashboard?tab=queue' })} title="Queue">
-          <I.cal /><span>Queue</span>
+        <button className="mobnav__item" onClick={() => goRail({ route: '/salon/dashboard?tab=queue' })} title="Bookings">
+          <I.cal /><span>Bookings</span>
         </button>
         <button className="mobnav__cta" onClick={() => setApptOpen(true)} title="New appointment" data-testid="mobnav-new-appt">
           <I.plus />

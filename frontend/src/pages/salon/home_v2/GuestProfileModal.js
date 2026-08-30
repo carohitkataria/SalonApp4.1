@@ -62,6 +62,11 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
   const authRef = useRef(getAuthHeaders);
   useEffect(() => { authRef.current = getAuthHeaders; }, [getAuthHeaders]);
 
+  // Phase 5.2 — only reset the sub-tab on a genuine open / customer change, so
+  // any parent re-render or background data refresh never snaps the drawer back
+  // to Overview. We track the last opened phone in a ref.
+  const openedForRef = useRef(null);
+
   const loadProfile = async () => {
     try {
       const res = await axios.get(`${API}/salons/${salonId}/customers/profile?phone=${encodeURIComponent(phone)}`, { headers: authRef.current() });
@@ -72,8 +77,13 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
     } catch (_) { setProfile(null); }
   };
   useEffect(() => {
-    if (!open || !phone) return;
-    setLoading(true); setProfile(null); setTab('overview'); setEditing(false); setVisitFilter('all');
+    if (!open || !phone) { openedForRef.current = null; return; }
+    const key = `${salonId}::${phone}`;
+    const isNewOpen = openedForRef.current !== key;
+    openedForRef.current = key;
+    setLoading(true);
+    setProfile(null);
+    if (isNewOpen) { setTab('overview'); setEditing(false); setVisitFilter('all'); }
     (async () => {
       await loadProfile();
       try {
@@ -83,6 +93,7 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
       } catch (_) { setBarbers([]); }
       setLoading(false);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, phone, salonId]);
 
   const p = profile || {};
@@ -346,7 +357,7 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
                     <div className="hist"><div className="row" style={{ justifyContent: 'center', color: '#9A9EAE', fontWeight: 600 }}>No visits in this filter.</div></div>
                   ) : (
                     <div className="hist">
-                      <div className="row head"><div>Date</div><div>Stylist</div><div>Services</div><div>Status</div><div>Total</div></div>
+                      <div className="row head"><div>Date</div><div>Stylist</div><div>Services</div><div>Status</div><div>Total</div><div>Invoice</div></div>
                       {shownVisits.map(t => {
                         const b = bucketOf(t.status); const cc = CHIP_COLOR[b];
                         const struck = b === 'cancelled';
@@ -357,6 +368,16 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
                             <div>{t.services_count}</div>
                             <div><span style={{ fontSize: 11, fontWeight: 800, borderRadius: 6, padding: '2px 8px', background: cc.bg, color: cc.fg }}>{b === 'noshow' ? 'No-show ⚑' : (t.status || '—')}</span></div>
                             <div className="money" style={struck ? { textDecoration: 'line-through' } : {}}>{fmtRupee(t.total)}</div>
+                            <div>
+                              {t.invoice_id ? (
+                                <a href={`${API}/invoices/${t.invoice_id}/view`} target="_blank" rel="noopener noreferrer"
+                                   style={{ fontSize: 11.5, fontWeight: 700, color: '#6C4FE0', textDecoration: 'none', border: '1px solid #E4E4EF', borderRadius: 6, padding: '3px 8px', whiteSpace: 'nowrap' }}>
+                                  View invoice
+                                </a>
+                              ) : (
+                                <span style={{ color: '#B9BDCB', fontSize: 11.5 }}>—</span>
+                              )}
+                            </div>
                           </div>
                         );
                       })}

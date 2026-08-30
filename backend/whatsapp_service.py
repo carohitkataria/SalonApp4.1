@@ -35,6 +35,46 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# ---------- Per-salon DB accessor (Phase 1 — multi-tenant Meta) ----------
+# server.py calls configure_db(db) at import so the credential resolver can
+# look up a salon's own Meta connection. Kept optional so the module still
+# imports/works (env fallback) if the DB isn't wired.
+_DB = None
+
+
+def configure_db(db) -> None:
+    global _DB
+    _DB = db
+
+
+async def _resolve_meta_creds(salon_id: Optional[str] = None):
+    """Return (phone_number_id, access_token, waba_id) for a salon's OWN Meta
+    connection when present, else the platform-owned env credentials.
+
+    Per-salon config lives in salon_channel_connections
+    {salon_id, provider:'meta', phone_number_id, access_token, waba_id, ...}.
+    Falls back to env (your own salon / pilots) so existing sends never break.
+    """
+    if salon_id and _DB is not None:
+        try:
+            conn = await _DB.salon_channel_connections.find_one(
+                {"salon_id": salon_id, "provider": "meta"}, {"_id": 0}
+            )
+            if conn and conn.get("phone_number_id") and conn.get("access_token"):
+                return (
+                    conn["phone_number_id"],
+                    conn["access_token"],
+                    conn.get("waba_id"),
+                )
+        except Exception as _e:
+            logger.warning(f"[Meta WA] per-salon creds lookup failed for {salon_id}: {_e}")
+    # Fallback = platform-owned number (env)
+    return (
+        os.environ.get("META_WA_PHONE_NUMBER_ID"),
+        os.environ.get("META_WA_ACCESS_TOKEN"),
+        os.environ.get("META_WA_BUSINESS_ACCOUNT_ID"),
+    )
+
 
 # ---------- Provider selection ----------
 
@@ -77,15 +117,20 @@ def _normalize_e164(phone: str) -> str:
 
 # ---------- Meta Cloud API primitives ----------
 
-async def _meta_post(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Low-level Graph API POST /{PHONE_NUMBER_ID}/messages."""
-    if not is_meta_configured():
-        logger.warning("[Meta WA] send skipped — META creds not configured, returning mock")
+async def _meta_post(payload: Dict[str, Any], salon_id: Optional[str] = None) -> Dict[str, Any]:
+    """Low-level Graph API POST /{PHONE_NUMBER_ID}/messages.
+
+    Phase 1 — resolves the SENDING salon's own phone_number_id + access_token
+    (via salon_channel_connections), falling back to platform env creds when the
+    salon has no connection. Short-circuits to a mock result when no creds exist
+    anywhere (so the wider system still works without Meta configured).
+    """
+    phone_number_id, token, _waba_id = await _resolve_meta_creds(salon_id)
+    if not (phone_number_id and token):
+        logger.warning("[Meta WA] send skipped — no Meta creds (salon or env), returning mock")
         return {"status": "mock", "provider": "meta", "reason": "not_configured"}
 
     api_version = os.environ.get("META_WA_API_VERSION") or "v21.0"
-    phone_number_id = os.environ.get("META_WA_PHONE_NUMBER_ID")
-    token = os.environ.get("META_WA_ACCESS_TOKEN")
     url = f"https://graph.facebook.com/{api_version}/{phone_number_id}/messages"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -112,7 +157,7 @@ async def _meta_post(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "failed", "provider": "meta", "error": str(e)}
 
 
-async def send_meta_text(to: str, body: str) -> Dict[str, Any]:
+async def send_meta_text(to: str, body: str, salon_id: Optional[str] = None) -> Dict[str, Any]:
     """Send a plain-text WhatsApp message via Meta (only within the 24-h
     customer service window — otherwise Meta will 400 and you must use a
     template)."""
@@ -122,7 +167,7 @@ async def send_meta_text(to: str, body: str) -> Dict[str, Any]:
         "type": "text",
         "text": {"body": body[:4096]},
     }
-    return await _meta_post(payload)
+    return await _meta_post(payload, salon_id=salon_id)
 
 
 async def send_meta_template(
@@ -132,6 +177,7 @@ async def send_meta_template(
     body_params: Optional[List[str]] = None,
     header_params: Optional[List[Dict[str, Any]]] = None,
     button_params: Optional[List[Dict[str, Any]]] = None,
+    salon_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send an approved WhatsApp *template* via Meta.
 
@@ -163,7 +209,7 @@ async def send_meta_template(
     }
     if components:
         payload["template"]["components"] = components
-    return await _meta_post(payload)
+    return await _meta_post(payload, salon_id=salon_id)
 
 
 # ---------- Unified router ----------
@@ -175,6 +221,7 @@ async def send_whatsapp_message(
     template_params: Optional[List[str]] = None,
     lang_code: str = "en_US",
     force_provider: Optional[str] = None,
+    salon_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Unified sender used by non-OTP flows.
 
@@ -195,9 +242,10 @@ async def send_whatsapp_message(
                 template_name=template_name,
                 lang_code=lang_code,
                 body_params=template_params or [],
+                salon_id=salon_id,
             )
         if text:
-            return await send_meta_text(to, text)
+            return await send_meta_text(to, text, salon_id=salon_id)
         return {"status": "failed", "provider": "meta", "reason": "empty_message"}
 
     # Twilio path — reuse the existing twilio_service helpers.

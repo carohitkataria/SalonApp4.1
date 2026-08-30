@@ -831,6 +831,31 @@ async def marketing_overview(
         {"salon_id": salon_id, "active": True}
     )
 
+    # Active memberships + total wallet liability (cash wallets + membership credit)
+    memberships_active = await _db.customer_memberships.count_documents(
+        {"salon_id": salon_id, "is_active": True}
+    )
+    wallet_total = 0.0
+    async for w in _db.customer_wallets.find({"salon_id": salon_id}, {"wallet_balance": 1}):
+        wallet_total += float(w.get("wallet_balance") or 0)
+    async for m in _db.customer_memberships.find(
+        {"salon_id": salon_id, "is_active": True}, {"wallet_balance": 1}
+    ):
+        wallet_total += float(m.get("wallet_balance") or 0)
+
+    # Channel mix — sent messages grouped by a derived channel (range-scoped)
+    channel_mix = {"whatsapp": 0, "sms": 0, "email": 0}
+    async for m in _db.marketing_messages.find(
+        {"salon_id": salon_id, "sent_at": match_range}, {"provider": 1}
+    ):
+        prov = str(m.get("provider") or "whatsapp").lower()
+        if "email" in prov:
+            channel_mix["email"] += 1
+        elif "sms" in prov:
+            channel_mix["sms"] += 1
+        else:
+            channel_mix["whatsapp"] += 1
+
     return {
         "range": {"from": df.isoformat(), "to": dt.isoformat()},
         "messaging": {
@@ -846,6 +871,9 @@ async def marketing_overview(
         },
         "campaigns_run": campaigns_run,
         "automations_active": automations_active,
+        "memberships_active": memberships_active,
+        "wallet_total": round(wallet_total, 2),
+        "channel_mix": channel_mix,
     }
 
 
@@ -1794,6 +1822,8 @@ class TemplateCreateIn(BaseModel):
     lang_code: str = "en"                # BCP-47 (WhatsApp uses en_US, but Twilio uses en)
     body: str
     header_text: Optional[str] = None
+    header_format: Optional[str] = None       # IMAGE | VIDEO | DOCUMENT (media header)
+    header_sample_url: Optional[str] = None   # sample media URL for Meta review
     footer_text: Optional[str] = None
     buttons: Optional[List[Dict[str, Any]]] = None   # [{type:"URL"|"QUICK_REPLY", text, url?}]
     # {{N}} placeholder → example value. Required by both Twilio (Content API

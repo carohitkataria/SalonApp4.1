@@ -409,6 +409,11 @@ def render_invoice_html(inv: Dict[str, Any]) -> str:
             '<div class="chip gold"><span class="c-l"><svg viewBox="0 0 24 24"><polygon points="12 2 15 9 22 9 16 14 18 21 12 17 6 21 8 14 2 9 9 9"/></svg> Loyalty points earned</span>'
             f'<span class="c-v">+{int(inv.get("loyalty_points") or 0)} pts</span></div>'
         )
+    if settings.get("show_points") and (inv.get("loyalty_wallet_credit") is not None):
+        chips += (
+            '<div class="chip gold"><span class="c-l"><svg viewBox="0 0 24 24"><polygon points="12 2 15 9 22 9 16 14 18 21 12 17 6 21 8 14 2 9 9 9"/></svg> Loyalty credit earned</span>'
+            f'<span class="c-v">+{_rupee(inv.get("loyalty_wallet_credit"))}</span></div>'
+        )
     if settings.get("show_wallet_balance") and (inv.get("wallet_balance") is not None):
         chips += (
             '<div class="chip"><span class="c-l"><svg viewBox="0 0 24 24"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/></svg> Salon wallet balance</span>'

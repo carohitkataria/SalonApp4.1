@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -500,50 +501,440 @@ async def save_auto_recharge(salon_id: str, body: AutoRechargeIn, request: Reque
 # ========================================================
 
 class ESCompleteIn(BaseModel):
+    # Phase 2 — real Meta Embedded Signup completion payload.
+    code: Optional[str] = None            # short-lived OAuth exchange code from FB.login
     waba_id: str
-    phone: str
+    phone_number_id: Optional[str] = None  # from the WA_EMBEDDED_SIGNUP event
+    phone: Optional[str] = None            # optional display E.164
     display_name: Optional[str] = None
+
+
+class ManualConnectIn(BaseModel):
+    # Part 1 — manual "Connect WhatsApp" (no Embedded Signup / App Review needed).
+    waba_id: str
+    phone_number_id: str
+    access_token: str
+    sender_phone_e164: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+def _meta_enabled() -> bool:
+    """True only when the platform Meta app credentials are present."""
+    return bool(os.environ.get("META_APP_ID") and os.environ.get("META_APP_SECRET"))
+
+
+def _graph_base() -> str:
+    api = os.environ.get("META_WA_API_VERSION") or os.environ.get("META_GRAPH_API_VERSION") or "v21.0"
+    return f"https://graph.facebook.com/{api}"
+
+
+async def provision_templates_for_waba(waba_id: str, access_token: str) -> List[Dict[str, Any]]:
+    """Phase 3.3 — push the platform's standard template library onto a salon's
+    WABA. Called on WABA connect and from the library "Use" action. Returns a
+    list of {name, status, resp} so the caller can surface approval state.
+
+    Safe in mock mode: if Meta creds are absent we simulate a 'mock' provision
+    so the flow still completes without network calls.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        lib = await _db.platform_template_library.find(
+            {"auto_provision": True}, {"_id": 0}
+        ).to_list(100)
+    except Exception:
+        lib = []
+    if not lib:
+        return out
+    base = _graph_base()
+    if not (_meta_enabled() and access_token and not str(access_token).startswith("mock")):
+        # Mock provision — no network calls.
+        for t in lib:
+            out.append({"name": t.get("name"), "status": "mock", "resp": {"mock": True}})
+        return out
+    async with httpx.AsyncClient(timeout=25) as c:
+        for t in lib:
+            try:
+                r = await c.post(
+                    f"{base}/{waba_id}/message_templates",
+                    params={"access_token": access_token},
+                    json=t.get("meta_payload") or {},
+                )
+                out.append({"name": t.get("name"), "status": r.status_code, "resp": r.json()})
+            except Exception as e:
+                out.append({"name": t.get("name"), "status": "error", "resp": {"error": str(e)}})
+    return out
 
 
 @settings_router.post("/salons/{salon_id}/marketing/settings/waba/embedded-signup-complete")
 async def embedded_signup_complete(salon_id: str, body: ESCompleteIn, request: Request):
-    """Called by the frontend once Meta's Embedded Signup returns a waba_id +
-    phone. Real path: our backend then (a) creates a Twilio sub-account for
-    the salon if not present, (b) registers the sender via Twilio Senders API,
-    (c) polls status. With DUMMY credentials this stub records the intent."""
+    """Phase 2 — complete Meta's Embedded Signup for THIS salon.
+
+    Real path (when META_APP_ID/SECRET present and a code is supplied):
+      1) exchange the code for a business access token,
+      2) subscribe OUR app to the salon's WABA,
+      3) register the salon's phone number for Cloud API,
+      4) persist the connection in salon_channel_connections (used by the
+         per-salon sender in whatsapp_service),
+      5) auto-provision the standard template library onto the WABA.
+
+    Mock/fallback path (no creds or no code): records the intent in
+    salon_channel_connections with verified=False so the UI + wider system work
+    without live Meta credentials.
+    """
+    user = await _require_admin(request)
+    _assert_salon_scope(user, salon_id)
+    now = _now_iso()
+
+    access_token: Optional[str] = None
+    mock = not (_meta_enabled() and body.code)
+
+    if not mock:
+        app_id = os.environ["META_APP_ID"]
+        app_secret = os.environ["META_APP_SECRET"]
+        base = _graph_base()
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                # 1) exchange code -> business token
+                tok = (await c.get(
+                    f"{base}/oauth/access_token",
+                    params={"client_id": app_id, "client_secret": app_secret, "code": body.code},
+                )).json()
+                access_token = tok.get("access_token")
+                if not access_token:
+                    raise HTTPException(status_code=400, detail=f"Token exchange failed: {tok}")
+                # 2) subscribe OUR app to the salon's WABA
+                await c.post(
+                    f"{base}/{body.waba_id}/subscribed_apps",
+                    params={"access_token": access_token},
+                )
+                # 3) register the phone number for Cloud API (only if we have the id)
+                if body.phone_number_id:
+                    await c.post(
+                        f"{base}/{body.phone_number_id}/register",
+                        params={"access_token": access_token},
+                        json={"messaging_product": "whatsapp", "pin": "000000"},
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Meta onboarding failed: {e}")
+    else:
+        # Mock token so the connection row + provisioning simulate cleanly.
+        access_token = f"mock_token_{uuid.uuid4().hex[:12]}"
+
+    conn = {
+        "salon_id": salon_id,
+        "provider": "meta",
+        "waba_id": body.waba_id,
+        "phone_number_id": body.phone_number_id,
+        "access_token": access_token,
+        "sender_phone_e164": body.phone,
+        "display_name": body.display_name,
+        "verified": not mock,
+        "mock": mock,
+        "connected_at": now,
+        "updated_at": now,
+    }
+    await _db.salon_channel_connections.update_one(
+        {"salon_id": salon_id, "provider": "meta"},
+        {"$set": conn, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    # 4) provision the standard template library onto this WABA (Phase 3.3)
+    provisioned = await provision_templates_for_waba(body.waba_id, access_token)
+
+    return {
+        "ok": True,
+        "mock": mock,
+        "waba_id": body.waba_id,
+        "phone_number_id": body.phone_number_id,
+        "verified": not mock,
+        "templates_provisioned": provisioned,
+    }
+
+
+# ========================================================
+# Part 1 (revised) — Meta-only. The SALON only submits its Number + Display name.
+# The platform owner fills the technical WABA credentials from the owner console.
+# ========================================================
+@settings_router.post("/salons/{salon_id}/marketing/settings/waba/request")
+async def waba_request(salon_id: str, body: ManualConnectIn, request: Request):
+    """Salon requests WhatsApp for its own number. Only `sender_phone_e164` and
+    `display_name` are accepted here — the platform owner supplies the WABA ID,
+    Phone Number ID and access token later. Sets status='pending' until then
+    (or keeps 'connected' if the owner already provisioned it)."""
+    user = await _require_admin(request)
+    _assert_salon_scope(user, salon_id)
+    if not (body.sender_phone_e164 or "").strip():
+        raise HTTPException(status_code=400, detail="WhatsApp number is required")
+
+    now = _now_iso()
+    existing = await _db.salon_channel_connections.find_one(
+        {"salon_id": salon_id, "provider": "meta"}, {"_id": 0}) or {}
+    already_connected = bool(existing.get("waba_id") and existing.get("phone_number_id"))
+    conn = {
+        "salon_id": salon_id,
+        "provider": "meta",
+        "sender_phone_e164": (body.sender_phone_e164 or "").strip(),
+        "display_name": (body.display_name or "").strip() or None,
+        "status": "connected" if already_connected else "pending",
+        "requested_at": existing.get("requested_at") or now,
+        "updated_at": now,
+    }
+    await _db.salon_channel_connections.update_one(
+        {"salon_id": salon_id, "provider": "meta"},
+        {"$set": conn, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return {"ok": True, "status": conn["status"],
+            "sender_phone_e164": conn["sender_phone_e164"], "display_name": conn["display_name"]}
+
+
+@settings_router.get("/salons/{salon_id}/marketing/settings/waba/status")
+async def waba_status(salon_id: str, request: Request):
+    """Return the salon's current WhatsApp (Meta) connection status.
+    connected == the platform owner has provisioned WABA + Phone Number ID."""
+    user = await _require_user(request)
+    _assert_salon_scope(user, salon_id)
+    conn = await _db.salon_channel_connections.find_one(
+        {"salon_id": salon_id, "provider": "meta"}, {"_id": 0}
+    )
+    if not conn:
+        return {"connected": False, "status": "none"}
+    connected = bool(conn.get("waba_id") and conn.get("phone_number_id"))
+    status = "connected" if connected else (conn.get("status") or "pending")
+    return {
+        "connected": connected,
+        "status": status,
+        "waba_id": conn.get("waba_id"),
+        "phone_number_id": conn.get("phone_number_id"),
+        "sender_phone_e164": conn.get("sender_phone_e164"),
+        "display_name": conn.get("display_name"),
+        "verified": bool(conn.get("verified")),
+        "mock": bool(conn.get("mock")),
+        "connected_via": conn.get("connected_via") or "manual",
+        "connected_at": conn.get("connected_at"),
+    }
+
+
+@settings_router.delete("/salons/{salon_id}/marketing/settings/waba")
+async def waba_disconnect(salon_id: str, request: Request):
+    """Disconnect the salon's WhatsApp (Meta) connection."""
+    user = await _require_admin(request)
+    _assert_salon_scope(user, salon_id)
+    res = await _db.salon_channel_connections.delete_one(
+        {"salon_id": salon_id, "provider": "meta"}
+    )
+    return {"ok": True, "removed": res.deleted_count}
+
+
+@settings_router.get("/salons/{salon_id}/marketing/settings/meta-spend")
+async def waba_meta_spend(salon_id: str, request: Request):
+    """WhatsApp (Meta) conversation spend for the salon's OWN WABA. When live,
+    this would read Meta conversation-analytics; in mock mode it returns a small
+    illustrative snapshot so the salon sees where the data will appear.
+    Billing for WhatsApp is charged by Meta directly to the salon's WABA."""
+    user = await _require_user(request)
+    _assert_salon_scope(user, salon_id)
+    conn = await _db.salon_channel_connections.find_one(
+        {"salon_id": salon_id, "provider": "meta"}, {"_id": 0}) or {}
+    connected = bool(conn.get("waba_id") and conn.get("phone_number_id"))
+    if not connected:
+        return {"connected": False, "status": conn.get("status") or "none"}
+    live = _meta_enabled() and conn.get("access_token") and not str(conn.get("access_token")).startswith("mock")
+    # Best-effort: sent conversations from our own message log this month.
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    sent = await _db.marketing_messages.count_documents(
+        {"salon_id": salon_id, "provider": "meta", "sent_at": {"$gte": month_start}})
+    return {
+        "connected": True,
+        "mock": not live,
+        "waba_id": conn.get("waba_id"),
+        "currency": "INR",
+        "month": now.strftime("%B %Y"),
+        "conversations_sent": sent,
+        "note": "Billed by Meta to your WABA. View full breakdown in Meta Business Manager.",
+    }
+
+
+# ========================================================
+# Phase 3.2 — salon self-serve: use a platform library template
+# POST /api/salons/{salon_id}/marketing/templates/library/{lib_id}/use
+# ========================================================
+@settings_router.post("/salons/{salon_id}/marketing/templates/library/{lib_id}/use")
+async def use_library_template(salon_id: str, lib_id: str, request: Request):
+    """Create a platform-library template on THIS salon's WABA and record its
+    per-salon approval status. Works in mock mode (no live Meta creds)."""
     user = await _require_admin(request)
     _assert_salon_scope(user, salon_id)
 
-    now = _now_iso()
-    existing = await _db.twilio_subaccounts.find_one({"salon_id": salon_id})
-    friendly_name = f"Sub-{salon_id[:8]}"
-    # DUMMY: fake sub-account SID so UI has something to render.
-    subaccount_sid = (existing or {}).get("subaccount_sid") or f"ACsub_{uuid.uuid4().hex[:16]}"
+    lib = await _db.platform_template_library.find_one({"id": lib_id}, {"_id": 0})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Library template not found")
 
-    payload = {
-        "salon_id": salon_id,
-        "subaccount_sid": subaccount_sid,
-        "friendly_name": friendly_name,
-        "waba_id": body.waba_id,
-        "sender_phone_e164": body.phone,
-        "messaging_service_sid": os.environ.get("TWILIO_WHATSAPP_MESSAGING_SERVICE_SID"),
-        "display_name": body.display_name or friendly_name,
-        "quality_rating": "GREEN",
-        "messaging_tier": "TIER_1K",
-        "sender_status": "online",
-        "updated_at": now,
-    }
-    await _db.twilio_subaccounts.update_one(
-        {"salon_id": salon_id},
-        {"$set": payload, "$setOnInsert": {"created_at": now}},
+    conn = await _db.salon_channel_connections.find_one(
+        {"salon_id": salon_id, "provider": "meta"}, {"_id": 0}
+    )
+    if not conn or not conn.get("waba_id"):
+        raise HTTPException(status_code=400, detail="Connect WhatsApp (WABA) first")
+
+    access_token = conn.get("access_token")
+    waba_id = conn.get("waba_id")
+    now = _now_iso()
+
+    live = _meta_enabled() and access_token and not str(access_token).startswith("mock")
+    if not live:
+        status = "mock"
+        resp: Dict[str, Any] = {"mock": True}
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=25) as c:
+                r = await c.post(
+                    f"{_graph_base()}/{waba_id}/message_templates",
+                    params={"access_token": access_token},
+                    json=lib.get("meta_payload") or {},
+                )
+                status = r.status_code
+                resp = r.json()
+        except Exception as e:
+            status = "error"
+            resp = {"error": str(e)}
+
+    await _db.salon_templates.update_one(
+        {"salon_id": salon_id, "name": lib.get("name")},
+        {"$set": {
+            "salon_id": salon_id,
+            "name": lib.get("name"),
+            "friendly_name": lib.get("friendly_name"),
+            "category": lib.get("category"),
+            "lang_code": lib.get("lang_code"),
+            "source": "library",
+            "library_id": lib_id,
+            "meta_status": "in_review" if live else "mock",
+            "last_provision_resp": resp,
+            "updated_at": now,
+        }, "$setOnInsert": {"created_at": now, "id": str(uuid.uuid4())}},
         upsert=True,
     )
-    return {"ok": True, **payload}
+    return {"ok": True, "mock": not live, "name": lib.get("name"), "status": status, "resp": resp}
 
 
 # ========================================================
-# POST /api/salons/{salon_id}/marketing/settings/waba/sync
+# Part 2B — salon adopts a library template (only enabled-for-salons ones)
+# POST /api/salons/{salon_id}/marketing/settings/library/{lib_id}/adopt
 # ========================================================
+@settings_router.post("/salons/{salon_id}/marketing/settings/library/{lib_id}/adopt")
+async def adopt_library_template(salon_id: str, lib_id: str, request: Request):
+    """Create the chosen owner-curated sample on THIS salon's WABA and submit it
+    for approval. Only templates the owner marked `enabled_for_salons` can be
+    adopted. Works in mock mode."""
+    user = await _require_admin(request)
+    _assert_salon_scope(user, salon_id)
+
+    lib = await _db.platform_template_library.find_one(
+        {"id": lib_id, "enabled_for_salons": True}, {"_id": 0})
+    if not lib:
+        raise HTTPException(status_code=404, detail="Template not available")
+
+    conn = await _db.salon_channel_connections.find_one(
+        {"salon_id": salon_id, "provider": "meta"}, {"_id": 0})
+    if not conn or not conn.get("waba_id"):
+        raise HTTPException(status_code=400, detail="Connect WhatsApp first.")
+
+    access_token = conn.get("access_token")
+    waba_id = conn.get("waba_id")
+    now = _now_iso()
+    live = _meta_enabled() and access_token and not str(access_token).startswith("mock")
+    if not live:
+        status: Any = "mock"
+        resp: Dict[str, Any] = {"mock": True}
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=25) as c:
+                r = await c.post(
+                    f"{_graph_base()}/{waba_id}/message_templates",
+                    params={"access_token": access_token},
+                    json=lib.get("meta_payload") or {},
+                )
+                status = r.status_code
+                resp = r.json()
+        except Exception as e:
+            status = "error"
+            resp = {"error": str(e)}
+
+    await _db.salon_templates.update_one(
+        {"salon_id": salon_id, "name": lib.get("name")},
+        {"$set": {
+            "salon_id": salon_id,
+            "name": lib.get("name"),
+            "friendly_name": lib.get("friendly_name"),
+            "category": lib.get("category"),
+            "lang_code": lib.get("lang_code"),
+            "group": lib.get("group"),
+            "source": "library",
+            "library_id": lib_id,
+            "meta_status": "in_review" if live else "mock",
+            "last_provision_resp": resp,
+            "updated_at": now,
+        }, "$setOnInsert": {"created_at": now, "id": str(uuid.uuid4())}},
+        upsert=True,
+    )
+    return {"ok": True, "mock": not live, "name": lib.get("name"), "status": status, "resp": resp}
+
+
+# ========================================================
+# Part 2D — per-event template binding
+# GET/PUT /api/salons/{salon_id}/marketing/settings/event-templates
+# ========================================================
+EVENT_KEYS = ["invoice", "booking_confirmation", "queue_followup", "reminder"]
+
+
+class EventTemplatesIn(BaseModel):
+    invoice: Optional[str] = None
+    booking_confirmation: Optional[str] = None
+    queue_followup: Optional[str] = None
+    reminder: Optional[str] = None
+
+
+@settings_router.get("/salons/{salon_id}/marketing/settings/event-templates")
+async def get_event_templates(salon_id: str, request: Request):
+    """Return the salon's event→template map plus the salon's approved templates
+    (candidates for binding)."""
+    user = await _require_user(request)
+    _assert_salon_scope(user, salon_id)
+    s = await _db.marketing_settings.find_one(
+        {"salon_id": salon_id}, {"_id": 0, "salon_event_templates": 1}) or {}
+    mapping = s.get("salon_event_templates") or {}
+    # Candidate templates = the salon's own templates (library-adopted + custom).
+    approved: List[Dict[str, Any]] = []
+    async for t in _db.salon_templates.find({"salon_id": salon_id}, {"_id": 0}):
+        approved.append({
+            "name": t.get("name"),
+            "friendly_name": t.get("friendly_name") or t.get("name"),
+            "meta_status": t.get("meta_status"),
+            "group": t.get("group"),
+        })
+    return {"events": EVENT_KEYS, "salon_event_templates": mapping, "templates": approved}
+
+
+@settings_router.put("/salons/{salon_id}/marketing/settings/event-templates")
+async def put_event_templates(salon_id: str, body: EventTemplatesIn, request: Request):
+    """Bind an approved template to each app event. Only provided keys are set."""
+    user = await _require_admin(request)
+    _assert_salon_scope(user, salon_id)
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    now = _now_iso()
+    await _db.marketing_settings.update_one(
+        {"salon_id": salon_id},
+        {"$set": {f"salon_event_templates.{k}": v for k, v in patch.items()} | {"updated_at": now},
+         "$setOnInsert": {"salon_id": salon_id, "created_at": now}},
+        upsert=True,
+    )
+    s = await _db.marketing_settings.find_one(
+        {"salon_id": salon_id}, {"_id": 0, "salon_event_templates": 1}) or {}
+    return {"ok": True, "salon_event_templates": s.get("salon_event_templates") or {}}
 
 @settings_router.post("/salons/{salon_id}/marketing/settings/waba/sync")
 async def waba_sync(salon_id: str, request: Request):

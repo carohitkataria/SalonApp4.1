@@ -45,6 +45,18 @@ function fmtDate(iso, opts = { day: '2-digit', month: 'short', year: 'numeric' }
 const money = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
 const initials = (n) => (n || '?').trim().split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 
+/* Normalize an Indian mobile typed in the guest search box to a clean 10-digit
+ * string. Accepts 10 digits, 11 with a leading 0, 12 with a 91 prefix, and 13
+ * with a +91 / 091 prefix. Returns null when it isn't a valid 10-digit mobile. */
+function normalizeMobile(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  else if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  else if (d.length === 13 && d.startsWith('091')) d = d.slice(3);
+  if (d.length === 10 && /^[6-9]/.test(d)) return d;
+  return null;
+}
+
 /* ----------- category palette ----------- */
 const CAT_COLORS = {
   "Men's Grooming": { cc: '#3E93E8', bg: '#E9F2FD' },
@@ -437,6 +449,15 @@ export default function AppointmentDrawer({
       (c.phone || '').includes(query)).slice(0, 8);
   }, [customers, custSearch]);
 
+  // A fully-typed, valid mobile that matches no existing guest → offer to book
+  // against that number (a phone-only guest record is created on save).
+  const typedNewMobile = useMemo(() => {
+    const norm = normalizeMobile(custSearch);
+    if (!norm) return null;
+    const already = customers.some((c) => (c.phone || '').replace(/\D/g, '').endsWith(norm));
+    return already ? null : norm;
+  }, [customers, custSearch]);
+
   /* ----------- actions ----------- */
   const toggleSvc = (id) => {
     setSelectedSvc((prev) => {
@@ -518,19 +539,25 @@ export default function AppointmentDrawer({
     setCustSearch(v);
     setShowSug(true);
     setCustomer(null); setCustProfile(null);
-    // Duplicate-detection: 10-digit exact match auto-picks that guest.
-    const digits = (v || '').replace(/\D/g, '');
-    if (digits.length >= 10) {
-      const key = digits.slice(-10);
-      const match = customers.find((c) => (c.phone || '').replace(/\D/g, '').endsWith(key));
+    // Duplicate-detection: a valid 10/11/12/13-digit mobile auto-picks that guest.
+    const norm = normalizeMobile(v);
+    if (norm) {
+      const match = customers.find((c) => (c.phone || '').replace(/\D/g, '').endsWith(norm));
       if (match) chooseCustomer(match);
     }
   };
+  // Explicitly book against a freshly-typed number (no matching guest yet).
+  const bookTypedMobile = (norm) => {
+    setCustomer({ id: null, name: '', phone: norm, gender: 'Men' });
+    setCustSearch(norm);
+    setShowSug(false);
+    setCustProfile(null);
+    setErrors((e) => ({ ...e, customer: null }));
+  };
   const openNewGuest = () => {
-    const digits = (custSearch || '').replace(/\D/g, '');
-    if (digits.length >= 10) {
-      const key = digits.slice(-10);
-      const match = customers.find((c) => (c.phone || '').replace(/\D/g, '').endsWith(key));
+    const norm = normalizeMobile(custSearch);
+    if (norm) {
+      const match = customers.find((c) => (c.phone || '').replace(/\D/g, '').endsWith(norm));
       if (match) { chooseCustomer(match); return; }
     }
     setSubOpen(true);
@@ -664,8 +691,8 @@ export default function AppointmentDrawer({
       let effName = customer?.name || '';
       let effPhone = customer?.phone || '';
       if (!customer && custSearch.trim()) {
-        const d = custSearch.replace(/\D/g, '');
-        if (d.length >= 10) effPhone = d.slice(-10); else effName = custSearch.trim();
+        const norm = normalizeMobile(custSearch);
+        if (norm) effPhone = norm; else effName = custSearch.trim();
       }
       const products_payload = Object.entries(selectedProd).map(([pid, qty]) => {
         const p = products.find((x) => x.id === pid);
@@ -1109,13 +1136,18 @@ export default function AppointmentDrawer({
                   data-testid="new-appt-guest-search"
                 />
                 <button className="inline-add" style={{ whiteSpace: 'nowrap' }} onClick={openNewGuest} data-testid="new-appt-new-guest">+ New</button>
-                {showSug && custSuggestions.length > 0 && (
+                {showSug && (custSuggestions.length > 0 || typedNewMobile) && (
                   <div className="autosug show" style={{ position: 'absolute', top: 40, left: 0, right: 0, zIndex: 30 }}>
                     {custSuggestions.map((c) => (
                       <button key={c.id || c.phone} onMouseDown={(e) => e.preventDefault()} onClick={() => chooseCustomer(c)}>
                         <b>{c.name || 'Unknown'}</b><span>{c.phone}</span>
                       </button>
                     ))}
+                    {typedNewMobile && (
+                      <button key="new-mobile" onMouseDown={(e) => e.preventDefault()} onClick={() => bookTypedMobile(typedNewMobile)} data-testid="new-appt-book-typed-mobile">
+                        <b>Book for +91 {typedNewMobile}</b><span>New guest · mobile only</span>
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
