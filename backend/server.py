@@ -658,8 +658,11 @@ class TokenModel(BaseModel):
     payment_mode: Optional[str] = None
     payment_confirmed: bool = False  # Salon must confirm payment before completing
     upi_transaction_id: Optional[str] = None
-    source: str
-    booking_type: str
+    # Fix (Aug 2026): older booking records predate these fields. Make them
+    # optional with sensible defaults so list/queue endpoints (response_model
+    # =List[TokenModel]) never fail validation on legacy tokens.
+    source: Optional[str] = "online"
+    booking_type: Optional[str] = "instant"  # instant/future
     booking_for_self: bool = True
     allocated_at: Optional[str] = None
     called_at: Optional[str] = None
@@ -3887,13 +3890,31 @@ async def generate_and_send_invoice(token_id: str):
             invoice_html_str = render_invoice_html(render_inv)
         except Exception as _html_err:
             logger.warning(f"invoice HTML render skipped: {_html_err}")
+
+        # Fix (Aug 2026) — generate and CACHE the PDF at invoice creation, BEFORE
+        # sending the WhatsApp message. In production the on-the-fly headless-Chrome
+        # render was unreliable when Meta fetched the attachment link, so the whole
+        # invoice message failed. We now render the PDF once here, store pdf_base64
+        # on the invoice record, and only send WhatsApp if the PDF was stored — a
+        # broken attachment link is worse than a delayed/retried message.
         pdf_base64 = None
+        if invoice_html_str:
+            try:
+                from html_pdf import html_to_pdf_bytes
+                import base64 as _b64
+                _pdf_bytes = await asyncio.to_thread(html_to_pdf_bytes, invoice_html_str)
+                if _pdf_bytes:
+                    pdf_base64 = _b64.b64encode(_pdf_bytes).decode("utf-8")
+            except Exception as _pdf_err:
+                logger.error(f"invoice PDF generation failed for {invoice_id}: {_pdf_err}")
+                pdf_base64 = None
 
         # Notify the customer. When WHATSAPP_PROVIDER=meta, deliver the invoice
         # through the Meta Cloud API template (PDF attachment + review button).
         # Otherwise fall back to the approved Twilio 'booking_completed' template.
-        # NOTE: the invoice record is stored FIRST so the PDF attachment URL
-        # (/api/invoices/{id}/pdf) resolves when Meta fetches it.
+        # NOTE: the invoice record is stored FIRST (with the cached PDF) so the
+        # PDF attachment URL (/api/invoices/{id}/pdf) resolves instantly when
+        # Meta fetches it.
         _ = invoice_link  # link is available for the in-app/PDF invoice view
 
         # Store invoice record (before sending, so the PDF link is live)
@@ -3914,6 +3935,20 @@ async def generate_and_send_invoice(token_id: str):
             "created_at": datetime.now(timezone.utc).isoformat()
         }
         await db.invoices.insert_one(invoice_record)
+
+        if not pdf_base64:
+            # PDF could not be generated/stored — do NOT send a WhatsApp with a
+            # broken attachment link. Surface it so it can be retried later.
+            logger.error(
+                f"Invoice {invoice_no} ({invoice_id}) PDF not cached — skipping WhatsApp send"
+            )
+            await db.invoices.update_one(
+                {"id": invoice_id}, {"$set": {"sent_status": "pdf_failed"}}
+            )
+            await db.tokens.update_one(
+                {"id": token_id}, {"$set": {"invoice_id": invoice_id}}
+            )
+            return {"status": "pdf_failed", "invoice_id": invoice_id}
 
         try:
             from whatsapp_service import get_active_provider
@@ -21315,6 +21350,23 @@ async def startup_event():
         await seed_test_data_main()
     except Exception as e:
         logger.error(f"[STARTUP] seed_test_data failed: {e}")
+    # Fix (Aug 2026) — backfill legacy booking records missing source/booking_type.
+    # Older tokens predate these fields; without them the queue/list endpoints
+    # (response_model=List[TokenModel]) errored out and the Bookings tab came
+    # back empty. Idempotent: only touches docs where the field is absent.
+    try:
+        r_src = await db.tokens.update_many(
+            {"source": {"$exists": False}}, {"$set": {"source": "online"}}
+        )
+        r_bt = await db.tokens.update_many(
+            {"booking_type": {"$exists": False}}, {"$set": {"booking_type": "instant"}}
+        )
+        if r_src.modified_count or r_bt.modified_count:
+            logger.info(
+                f"[STARTUP] booking backfill: source={r_src.modified_count} booking_type={r_bt.modified_count}"
+            )
+    except Exception as e:
+        logger.error(f"[STARTUP] booking source/booking_type backfill failed: {e}")
     logger.info("Application started with multi-salon support")
 
 @fastapi_app.on_event("shutdown")
