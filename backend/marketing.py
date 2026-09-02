@@ -1824,6 +1824,7 @@ class TemplateCreateIn(BaseModel):
     header_text: Optional[str] = None
     header_format: Optional[str] = None       # IMAGE | VIDEO | DOCUMENT (media header)
     header_sample_url: Optional[str] = None   # sample media URL for Meta review
+    header_handle: Optional[str] = None       # Meta media handle from Resumable Upload API
     footer_text: Optional[str] = None
     buttons: Optional[List[Dict[str, Any]]] = None   # [{type:"URL"|"QUICK_REPLY", text, url?}]
     # {{N}} placeholder → example value. Required by both Twilio (Content API
@@ -2157,11 +2158,47 @@ async def submit_template_for_approval(salon_id: str, tid: str, body: TemplateSu
                     )
                 example_row.append(v)
             body_component["example"] = {"body_text": [example_row]}
+        # Fix 4 (Aug 2026) — include HEADER (text/media), FOOTER and BUTTONS so
+        # the full template (including a media header with its Meta media handle)
+        # is submitted, not just the body.
+        meta_components: List[Dict[str, Any]] = []
+        _hfmt = (t.get("header_format") or "").upper()
+        _htext = t.get("header_text")
+        if _htext:
+            _hc: Dict[str, Any] = {"type": "HEADER", "format": "TEXT", "text": _htext}
+            if _re.findall(r"\{\{\s*(\d+)\s*\}\}", _htext):
+                _hc["example"] = {"header_text": [(examples.get("header") or "Sample")]}
+            meta_components.append(_hc)
+        elif _hfmt in ("IMAGE", "VIDEO", "DOCUMENT"):
+            _handle = t.get("header_handle") or t.get("header_sample_url")
+            _hc = {"type": "HEADER", "format": _hfmt}
+            if _handle:
+                _hc["example"] = {"header_handle": [_handle]}
+            meta_components.append(_hc)
+        meta_components.append(body_component)
+        if t.get("footer_text"):
+            meta_components.append({"type": "FOOTER", "text": t.get("footer_text")})
+        _btns = t.get("buttons") or []
+        if _btns:
+            _out_btns = []
+            for _b in _btns:
+                _bt = (_b.get("type") or "").upper()
+                if _bt == "QUICK_REPLY":
+                    _out_btns.append({"type": "QUICK_REPLY", "text": _b.get("text")})
+                elif _bt in ("PHONE_NUMBER", "CALL"):
+                    _out_btns.append({"type": "PHONE_NUMBER", "text": _b.get("text"), "phone_number": _b.get("phone") or _b.get("phone_number")})
+                elif _bt == "URL":
+                    _u = {"type": "URL", "text": _b.get("text"), "url": _b.get("url")}
+                    if _b.get("sample"):
+                        _u["example"] = [_b.get("sample")]
+                    _out_btns.append(_u)
+            if _out_btns:
+                meta_components.append({"type": "BUTTONS", "buttons": _out_btns})
         payload = {
             "name": t.get("name"),
             "language": t.get("lang_code") or "en_US",
             "category": (t.get("category") or "UTILITY").upper(),
-            "components": [body_component],
+            "components": meta_components,
         }
         url = f"https://graph.facebook.com/{api_ver}/{waba_id}/message_templates"
         async with httpx.AsyncClient(timeout=15.0) as client:

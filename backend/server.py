@@ -3102,12 +3102,45 @@ def _require_platform_owner(admin: dict):
     return admin
 
 
+async def get_owner_or_salon_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Accept EITHER a platform-owner/admin token OR a salon-user token.
+
+    Fix (Aug 2026): the owner console reads the template library with a
+    platform-admin token, but this endpoint previously required a salon-user
+    token — so the owner screen failed with "Failed to load template library".
+    This shared dependency lets both the owner console and the salon app read
+    the same endpoint.
+    """
+    token = credentials.credentials
+    # 1) Try a platform admin/owner token first.
+    try:
+        p = platform_admin_mod._decode_token(token)
+        if p and p.get("role") == "platform_admin":
+            admin = await db.platform_admins.find_one(
+                {"id": p.get("platform_admin_id")}, {"_id": 0}
+            )
+            if admin and admin.get("status") == "active":
+                return {**admin, "is_platform_admin": True}
+    except Exception:
+        pass
+    # 2) Fall back to a salon-user token.
+    payload = verify_token(token)
+    if payload and payload.get("role") in [
+        "salon_admin", "salon_staff", "salon_branch_manager", "salon"
+    ]:
+        return payload
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid authentication credentials",
+    )
+
+
 @api_router.get("/platform/template-library")
 async def list_platform_template_library(only_enabled: bool = False,
-                                         current_user=Depends(get_current_salon_user)):
-    """List library templates — readable by any authenticated salon (and owner).
-    Pass only_enabled=true (salon-facing library) to return just the samples the
-    owner has marked visible to salons."""
+                                         current_user=Depends(get_owner_or_salon_user)):
+    """List library templates — readable by the platform owner AND any
+    authenticated salon. Pass only_enabled=true (salon-facing library) to return
+    just the samples the owner has marked visible to salons."""
     q = {"enabled_for_salons": True} if only_enabled else {}
     items = await db.platform_template_library.find(q, {"_id": 0}).sort("created_at", 1).to_list(200)
     return {"templates": items}
@@ -3169,6 +3202,127 @@ async def delete_platform_template(lib_id: str,
     return {"ok": True, "deleted": lib_id}
 
 
+# ---------------------------------------------------------------------------
+# Fix 4 (Aug 2026) — Media header UPLOAD → Meta media handle.
+# The template media header needs a media *handle* obtained from Meta's
+# Resumable Upload API (NOT just a hosted URL). These endpoints accept a real
+# file (multipart/form-data), push it through Meta's two-step upload, and return
+# the handle for the frontend to place in components[HEADER].example.header_handle.
+#
+# In mock mode (no META_APP_ID / access token, e.g. preview) we return a
+# deterministic mock handle so the whole create-template flow still works.
+# ---------------------------------------------------------------------------
+_MEDIA_ALLOWED_TYPES = {
+    # documents
+    "application/pdf",
+    # images
+    "image/png", "image/jpeg", "image/jpg", "image/webp",
+    # video
+    "video/mp4", "video/3gpp",
+}
+
+
+async def _meta_resumable_upload(file: UploadFile, access_token: Optional[str] = None) -> dict:
+    """Upload a file to Meta's Resumable Upload API and return {handle,...}.
+
+    Two-step Graph flow:
+      1) POST /{META_APP_ID}/uploads?file_length=&file_type=&access_token=  -> {id}
+      2) POST /{upload_id} with Authorization: OAuth <token>, file_offset:0 + raw bytes -> {h}
+    """
+    content = await file.read()
+    file_length = len(content)
+    file_type = (file.content_type or "application/octet-stream").split(";")[0].strip()
+    if file_length == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if file_type not in _MEDIA_ALLOWED_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{file_type}'. Allowed: PDF, PNG/JPEG/WEBP images, MP4 video.",
+        )
+
+    app_id = os.environ.get("META_APP_ID")
+    token = access_token or os.environ.get("META_WA_ACCESS_TOKEN")
+    api = (os.environ.get("META_WA_API_VERSION")
+           or os.environ.get("META_GRAPH_API_VERSION") or "v21.0")
+
+    # Mock mode — no live Meta credentials. Return a deterministic fake handle so
+    # the UI + template create/submit flow works end-to-end in preview.
+    if not (app_id and token):
+        import hashlib
+        h = "mock_handle:" + hashlib.sha256(content).hexdigest()[:40]
+        return {
+            "ok": True, "handle": h, "mock": True,
+            "file_name": file.filename, "file_type": file_type, "file_length": file_length,
+        }
+
+    base = f"https://graph.facebook.com/{api}"
+    async with httpx.AsyncClient(timeout=90) as c:
+        # 1) Start an upload session.
+        try:
+            r1 = await c.post(
+                f"{base}/{app_id}/uploads",
+                params={"file_length": file_length, "file_type": file_type,
+                        "access_token": token},
+            )
+            r1j = r1.json()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Meta upload session error: {e}")
+        upload_id = r1j.get("id")
+        if not upload_id:
+            raise HTTPException(status_code=400, detail=f"Meta upload session failed: {r1j}")
+
+        # 2) Upload the bytes.
+        try:
+            r2 = await c.post(
+                f"{base}/{upload_id}",
+                headers={"Authorization": f"OAuth {token}", "file_offset": "0"},
+                content=content,
+            )
+            r2j = r2.json()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Meta upload error: {e}")
+        handle = r2j.get("h")
+        if not handle:
+            raise HTTPException(status_code=400, detail=f"Meta upload failed: {r2j}")
+        return {
+            "ok": True, "handle": handle,
+            "file_name": file.filename, "file_type": file_type, "file_length": file_length,
+        }
+
+
+@api_router.post("/platform/media/upload")
+async def platform_media_upload(
+    file: UploadFile = File(...),
+    admin=Depends(platform_admin_mod.get_current_platform_admin),
+):
+    """Owner: upload a sample media file (PDF/image/video) → Meta media handle."""
+    _require_platform_owner(admin)
+    return await _meta_resumable_upload(file)
+
+
+@api_router.post("/salons/{salon_id}/media/upload")
+async def salon_media_upload(
+    salon_id: str,
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_salon_user),
+):
+    """Salon: upload a sample media file (PDF/image/video) → Meta media handle.
+
+    Uses the salon's connected WABA access token when available, else falls back
+    to the platform token / mock mode.
+    """
+    access_token = None
+    try:
+        conn = await db.salon_channel_connections.find_one(
+            {"salon_id": salon_id}, {"_id": 0, "access_token": 1}
+        )
+        if conn:
+            at = conn.get("access_token")
+            if at and not str(at).startswith("mock"):
+                access_token = at
+    except Exception:
+        access_token = None
+    return await _meta_resumable_upload(file, access_token=access_token)
 
 
 

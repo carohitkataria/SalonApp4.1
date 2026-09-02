@@ -1800,6 +1800,10 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
   const [headerText, setHeaderText] = useState('');
   const [headerFormat, setHeaderFormat] = useState('IMAGE');  // IMAGE | VIDEO | DOCUMENT
   const [headerSampleUrl, setHeaderSampleUrl] = useState('');
+  const [headerHandle, setHeaderHandle] = useState('');       // Meta media handle from upload
+  const [headerFileName, setHeaderFileName] = useState('');
+  const [uploadingMedia, setUploadingMedia] = useState(false);
+  const mediaFileRef = useRef(null);
   const [footerText, setFooterText] = useState('');
   const [buttons, setButtons] = useState([]);                 // [{type, text, url?, phone?, sample?}]
   const addButton = (type) => setButtons((b) => b.length >= 3 ? b : [...b, type === 'QUICK_REPLY' ? { type, text: '' } : type === 'PHONE_NUMBER' ? { type, text: '', phone: '' } : { type: 'URL', text: '', url: '', sample: '' }]);
@@ -1818,6 +1822,7 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
       setName(''); setCategory('utility'); setLangCode('en');
       setBody(DEFAULT_BODY);
       setHeaderType('none'); setHeaderText(''); setHeaderFormat('IMAGE'); setHeaderSampleUrl('');
+      setHeaderHandle(''); setHeaderFileName('');
       setFooterText(''); setButtons([]);
       setVarMap({
         1: { key: 'customer_name', sample: 'Priya' },
@@ -1837,6 +1842,8 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
       setHeaderType(initial.header_text ? 'text' : (initial.header_format ? 'media' : 'none'));
       setHeaderFormat(initial.header_format || 'IMAGE');
       setHeaderSampleUrl(initial.header_sample_url || '');
+      setHeaderHandle(initial.header_handle || '');
+      setHeaderFileName('');
       setFooterText(initial.footer_text || '');
       setButtons(Array.isArray(initial.buttons) ? initial.buttons : []);
       // Rebuild varMap from example_values + variables_meta if present
@@ -1879,6 +1886,28 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
     // Insert {{N}} at end of body if not present
     const marker = `{{${idx}}}`;
     if (!body.includes(marker)) setBody((b) => b + (b.endsWith(' ') ? '' : ' ') + marker);
+  };
+
+  const uploadMediaFile = async (file) => {
+    if (!file) return;
+    setUploadingMedia(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await axios.post(`${API}/salons/${salonId}/media/upload`, fd, { headers: authHeaders() });
+      const handle = r.data?.handle;
+      if (!handle) throw new Error('No handle returned');
+      setHeaderHandle(handle);
+      setHeaderFileName(file.name);
+      setHeaderSampleUrl('');
+      toast.success(r.data?.mock ? 'File uploaded (mock handle)' : 'File uploaded to Meta');
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Upload failed');
+    } finally {
+      setUploadingMedia(false);
+      if (mediaFileRef.current) mediaFileRef.current.value = '';
+    }
   };
 
   const saveDraft = async () => {
@@ -1928,6 +1957,7 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
           header_text: headerType === 'text' ? (headerText || null) : null,
           header_format: headerType === 'media' ? headerFormat : null,
           header_sample_url: headerType === 'media' ? (headerSampleUrl || null) : null,
+          header_handle: headerType === 'media' ? (headerHandle || null) : null,
           footer_text: footerText || null,
           buttons: buttons.length ? buttons.filter(b => (b.text || '').trim()) : null,
           example_values,
@@ -2012,13 +2042,33 @@ function NewTemplateDrawer({ open, onClose, salonId, authHeaders, onSaved, initi
           <input placeholder="Header text (e.g. Your invoice is ready)" value={headerText} onChange={(e) => setHeaderText(e.target.value)} data-testid="tpl-header-text" />
         )}
         {headerType === 'media' && (
-          <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8 }}>
-            <select value={headerFormat} onChange={(e) => setHeaderFormat(e.target.value)} data-testid="tpl-header-format">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <select value={headerFormat} onChange={(e) => { setHeaderFormat(e.target.value); setHeaderHandle(''); setHeaderFileName(''); }} data-testid="tpl-header-format" style={{ maxWidth: 180 }}>
               <option value="IMAGE">Image</option>
               <option value="VIDEO">Video</option>
               <option value="DOCUMENT">Document</option>
             </select>
-            <input placeholder="Sample media URL (for Meta review)" value={headerSampleUrl} onChange={(e) => setHeaderSampleUrl(e.target.value)} data-testid="tpl-header-media-url" />
+            <input
+              ref={mediaFileRef}
+              type="file"
+              accept={headerFormat === 'IMAGE' ? 'image/png,image/jpeg,image/webp' : headerFormat === 'VIDEO' ? 'video/mp4,video/3gpp' : 'application/pdf'}
+              style={{ display: 'none' }}
+              onChange={(e) => uploadMediaFile(e.target.files?.[0])}
+              data-testid="tpl-header-file-input"
+            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <button type="button" className="btn-ghost" disabled={uploadingMedia} onClick={() => mediaFileRef.current?.click()} data-testid="tpl-header-upload-btn">
+                {uploadingMedia ? 'Uploading…' : `Upload sample ${headerFormat === 'DOCUMENT' ? 'PDF' : headerFormat.toLowerCase()}`}
+              </button>
+              {headerHandle && (
+                <span style={{ fontSize: 12, color: '#0F5132', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  {headerFileName || 'file'} uploaded
+                  <button type="button" className="btn-ghost" style={{ padding: '2px 6px' }} onClick={() => { setHeaderHandle(''); setHeaderFileName(''); }}>✕</button>
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>Upload a real PDF / image / video sample — it becomes the template's media handle for Meta review.</div>
+            <input placeholder="…or paste a sample media URL (optional)" value={headerSampleUrl} onChange={(e) => setHeaderSampleUrl(e.target.value)} data-testid="tpl-header-media-url" />
           </div>
         )}
       </div>
