@@ -658,7 +658,11 @@ export default function AppointmentDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subtotal]);
 
-  const stylistRequired = mode === 'direct' && opsSettings.stylist_required !== false;
+  // Barber rules: a stylist is NOT required for a membership-only sale.
+  // It stays required when the cart includes any service (and product-only is
+  // unchanged from before).
+  const isMembershipOnly = !!sellMembershipId && selectedSvc.length === 0 && Object.keys(selectedProd).length === 0;
+  const stylistRequired = mode === 'direct' && opsSettings.stylist_required !== false && !isMembershipOnly;
   const modeLabel = mode === 'schedule' ? 'Book appointment' : mode === 'queue' ? 'Add to queue' : 'Create invoice';
 
   const save = async () => {

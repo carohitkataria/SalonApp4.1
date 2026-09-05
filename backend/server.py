@@ -16460,8 +16460,8 @@ async def create_direct_invoice(
     final_amount_override = body.get("final_amount_override")
     notes = body.get("notes") or ""
 
-    if not selected_services and not selected_products:
-        raise HTTPException(status_code=400, detail="Add at least one service or product")
+    if not selected_services and not selected_products and not membership_plan_id:
+        raise HTTPException(status_code=400, detail="Add at least one service, product or membership")
 
     # -- Per-service barber map (Module 7 split): service_id -> barber_id --
     services_payload = body.get("services_payload") or []

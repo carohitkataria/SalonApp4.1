@@ -96,6 +96,37 @@
 # END - Testing Protocol - DO NOT EDIT OR REMOVE THIS SECTION
 
 #====================================================================================================
+# BUGFIX TASK (Sep 2026) — Allow membership-only direct-invoice sale
+#====================================================================================================
+membership_only_bugfix_problem_statement: "Selling a membership alone was blocked by HTTPException(400, 'Add at least one service or product') in the direct-invoice endpoint. Fix: if membership_plan_id is present in the sale, do NOT require a service or product — permit a membership-only sale. Barber selection is not required for a membership-only sale (backend auto-assigns 'any'); barber is required when the cart includes a service (frontend rule). Product-only stays as-is."
+
+membership_only_backend:
+  - task: "Allow membership-only direct-invoice sale (POST /api/salons/{salon_id}/direct-invoice)"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Changed the guard from `if not selected_services and not selected_products` to also allow when membership_plan_id is present: `if not selected_services and not selected_products and not membership_plan_id`. Membership handling already computes grand_total = membership_sale_amount + tip. Barber is never hard-required (auto-assigns 'any' -> first active barber). Needs backend testing."
+
+membership_only_test_plan:
+  current_focus:
+    - "Allow membership-only direct-invoice sale (POST /api/salons/{salon_id}/direct-invoice)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+membership_only_agent_communication:
+    -agent: "main"
+    -message: "Please test POST /api/salons/{salon_id}/direct-invoice for a MEMBERSHIP-ONLY sale (membership_plan_id set, NO services, NO products, NO barber_id). It must succeed (200) and NOT return the 400 'Add at least one service or product'. The created invoice/token should reflect the membership sale amount in the total. Also confirm the endpoint still rejects a truly empty cart (no services, no products, no membership) with 400. Admin login: POST /api/salon/users/login {identifier:'admin', password:'salon123'}, salon_id b2d24a1f-1586-4160-b539-cac1737768ac. A membership plan may need to be created first via the membership plans endpoint (or seed one). Do NOT change invoice totals/tax/numbering logic. Clean up any test data you create."
+
+
+
+#====================================================================================================
 # CURRENT TASK (Sep 2026) — SalonHub second invoice template (URL) + adaptive send + WeasyPrint
 #====================================================================================================
 current_task_problem_statement: "SalonHub — register a SECOND invoice WhatsApp template (invoice_default_1_invoice_url, a view-link/no-PDF shape) alongside the existing invoice_default_1_attachment (PDF attachment). Make send_meta_invoice_template ADAPT its Meta components to whichever template the salon binds to the 'invoice' event (attachment => DOCUMENT header + {{1}}-{{4}}; url => no header + {{1}}-{{5}} where {{5}} = public /view link). Make the /api/invoices/{id}/view link public (no login). Fix PDF renderer to use WeasyPrint (browserless, in-memory). Do NOT change invoice totals/tax/numbering. NOTE: on resume, the backend was crashing due to a corrupted def line and both .env files were missing — recovered."
