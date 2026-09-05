@@ -147,6 +147,7 @@ const AUTOMATION_TYPES = [
   { key: 'spouse_birthday', title: 'Spouse birthday', desc: 'Send on spouse\u2019s birthday' },
   { key: 'win_back', title: 'Win-back lapsed guests', desc: 'Re-engage guests who went quiet' },
   { key: 'reminder', title: 'Appointment reminder', desc: 'Nudge before/after appointments' },
+  { key: 'membership_expiring', title: 'Membership expiring', desc: 'Remind guests before their membership ends' },
 ];
 const AUTOMATION_LABELS = AUTOMATION_TYPES.reduce((acc, t) => { acc[t.key] = { title: t.title, desc: t.desc, ic: Ico.bolt }; return acc; }, {});
 
@@ -840,7 +841,8 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
             {automations.map((a) => {
               const label = AUTOMATION_LABELS[a.type] || { title: a.type || 'Automation', desc: '', ic: Ico.bolt };
               const extra = a.type === 'win_back' ? ` · after ${a.threshold_days || 0} inactive days`
-                : a.type === 'reminder' ? ` · offset ${a.offset_days || 0} day(s)` : '';
+                : a.type === 'reminder' ? ` · offset ${a.offset_days || 0} day(s)`
+                : a.type === 'membership_expiring' ? ` · ${a.offset_days || 7} day(s) before expiry` : '';
               return (
                 <div className="auto-row" key={a.id} data-testid={`automation-row-${a.id}`}>
                   <div className="ai" style={{background:'var(--sky-bg)', color:'var(--sky)'}}><label.ic /></div>
@@ -1684,7 +1686,7 @@ function NewAutomationDrawer({ open, onClose, templates, coupons = [], salonId, 
         template_body: templateBody.trim(),
         coupon_id: couponId || null,
         threshold_days: type === 'win_back' ? Number(thresholdDays || 0) : null,
-        offset_days: type === 'reminder' ? Number(offsetDays || 0) : null,
+        offset_days: (type === 'reminder' || type === 'membership_expiring') ? Number(offsetDays || 0) : null,
         provider: provider || null,
       };
       if (editing) {
@@ -1711,7 +1713,7 @@ function NewAutomationDrawer({ open, onClose, templates, coupons = [], salonId, 
       }
     >
       <div className="v2-field"><label>Trigger type</label>
-        <select value={type} onChange={(e) => setType(e.target.value)} data-testid="automation-type-select">
+        <select value={type} onChange={(e) => { const v = e.target.value; setType(v); if (v === 'membership_expiring' && (offsetDays === '1' || !offsetDays)) setOffsetDays('7'); }} data-testid="automation-type-select">
           {AUTOMATION_TYPES.map((t) => <option key={t.key} value={t.key}>{t.title}</option>)}
         </select>
         <div style={{fontSize:11.5, color:'var(--muted,#6b6489)', marginTop:4}}>{(AUTOMATION_TYPES.find(t => t.key === type) || {}).desc}</div>
@@ -1724,6 +1726,12 @@ function NewAutomationDrawer({ open, onClose, templates, coupons = [], salonId, 
       {type === 'reminder' && (
         <div className="v2-field"><label>Offset (days before/after appointment)</label>
           <input type="number" value={offsetDays} onChange={(e) => setOffsetDays(e.target.value)} data-testid="automation-offset-input" />
+        </div>
+      )}
+      {type === 'membership_expiring' && (
+        <div className="v2-field"><label>Send this many days before expiry</label>
+          <input type="number" min="1" value={offsetDays} onChange={(e) => setOffsetDays(e.target.value)} data-testid="automation-membership-offset-input" />
+          <div style={{fontSize:11.5, color:'var(--muted,#6b6489)', marginTop:4}}>Use placeholders {'{{name}}'}, {'{{membership_name}}'}, {'{{expiry_date}}'} in the message.</div>
         </div>
       )}
       <div className="v2-field"><label>Prefill from a template (optional)</label>

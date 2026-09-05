@@ -18567,7 +18567,13 @@ async def _send_expiry_reminder(m: Dict[str, Any], days_left: int, key: str):
 
     # WhatsApp (respects customer's whatsapp_membership_expiry setting)
     try:
-        if await should_send_customer_whatsapp(phone, "whatsapp_membership_expiry"):
+        # Skip the plain reminder if the salon runs its own membership-expiring
+        # marketing automation — that flow sends the branded offer instead, so we
+        # don't double-message the customer on WhatsApp.
+        salon_has_auto = await db.marketing_automations.count_documents(
+            {"salon_id": salon_id, "type": "membership_expiring", "active": True}
+        )
+        if not salon_has_auto and await should_send_customer_whatsapp(phone, "whatsapp_membership_expiry"):
             msg = (
                 f"Hi {m.get('customer_name','')}, your {name} membership expires in ~{label} "
                 f"(on {str(m.get('expiry_date',''))[:10]}). Please visit the salon to renew."

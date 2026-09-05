@@ -1304,7 +1304,7 @@ async def campaign_messages(salon_id: str, cid: str, request: Request, limit: in
 # M6 — Automations (birthday / anniversary / spouse-b'day / win-back / reminders)
 # ================================================================
 
-AUTOMATION_TYPES = {"birthday", "wedding_anniversary", "spouse_birthday", "win_back", "reminder"}
+AUTOMATION_TYPES = {"birthday", "wedding_anniversary", "spouse_birthday", "win_back", "reminder", "membership_expiring"}
 
 
 class AutomationIn(BaseModel):
@@ -1397,39 +1397,66 @@ async def _run_automation(salon_id: str, aid: str) -> int:
         coupon = await _db.salon_coupons.find_one({"id": autom["coupon_id"], "salon_id": salon_id})
 
     # 1) Resolve target customers
-    customers = await _resolve_customers_for_salon(salon_id)
     targets: List[Dict[str, Any]] = []
-    for c in customers:
-        dob = c.get("dob") or ""
-        wa = c.get("wedding_anniversary") or ""
-        sd = c.get("spouse_date_of_birth") or ""
-        pick = False
-        if atype == "birthday" and dob[5:10] == f"{tm:02d}-{td:02d}":
-            pick = True
-        elif atype == "wedding_anniversary" and wa[5:10] == f"{tm:02d}-{td:02d}":
-            pick = True
-        elif atype == "spouse_birthday" and sd[5:10] == f"{tm:02d}-{td:02d}":
-            pick = True
-        elif atype == "win_back":
-            thr = int(autom.get("threshold_days") or 90)
-            stats = await _compute_stats(salon_id, c.get("phone"))
-            lv = stats.get("last_visit_days")
-            if lv is not None and lv >= thr:
+    if atype == "membership_expiring":
+        # Target active memberships whose expiry is exactly `offset_days` away
+        # (default 7 days before expiry). Each target carries membership context.
+        days_before = int(autom.get("offset_days") if autom.get("offset_days") is not None else 7)
+        today_d = today.date()
+        cursor = _db.customer_memberships.find({
+            "salon_id": salon_id,
+            "is_active": True,
+            "$or": [{"cancelled": False}, {"cancelled": {"$exists": False}}],
+        })
+        async for m in cursor:
+            exp_raw = m.get("expiry_date")
+            if not exp_raw:
+                continue
+            try:
+                exp_dt = datetime.fromisoformat(str(exp_raw).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if (exp_dt.date() - today_d).days == days_before and m.get("customer_phone"):
+                targets.append({
+                    "phone": m.get("customer_phone"),
+                    "name": m.get("customer_name") or "",
+                    "membership_name": m.get("membership_name") or "membership",
+                    "expiry_date": str(exp_raw)[:10],
+                    "days_left": days_before,
+                })
+    else:
+        customers = await _resolve_customers_for_salon(salon_id)
+        for c in customers:
+            dob = c.get("dob") or ""
+            wa = c.get("wedding_anniversary") or ""
+            sd = c.get("spouse_date_of_birth") or ""
+            pick = False
+            if atype == "birthday" and dob[5:10] == f"{tm:02d}-{td:02d}":
                 pick = True
-        elif atype == "reminder":
-            # Reminder: bookings scheduled today at this salon (offset_days=0 default)
-            offset = int(autom.get("offset_days") or 0)
-            target_date = (today + timedelta(days=offset)).strftime("%Y-%m-%d")
-            has_booking = await _db.tokens.count_documents({
-                "salon_id": salon_id,
-                "user_phone": c.get("phone"),
-                "date": target_date,
-                "status": {"$nin": ["cancelled", "completed"]},
-            })
-            if has_booking:
+            elif atype == "wedding_anniversary" and wa[5:10] == f"{tm:02d}-{td:02d}":
                 pick = True
-        if pick:
-            targets.append(c)
+            elif atype == "spouse_birthday" and sd[5:10] == f"{tm:02d}-{td:02d}":
+                pick = True
+            elif atype == "win_back":
+                thr = int(autom.get("threshold_days") or 90)
+                stats = await _compute_stats(salon_id, c.get("phone"))
+                lv = stats.get("last_visit_days")
+                if lv is not None and lv >= thr:
+                    pick = True
+            elif atype == "reminder":
+                # Reminder: bookings scheduled today at this salon (offset_days=0 default)
+                offset = int(autom.get("offset_days") or 0)
+                target_date = (today + timedelta(days=offset)).strftime("%Y-%m-%d")
+                has_booking = await _db.tokens.count_documents({
+                    "salon_id": salon_id,
+                    "user_phone": c.get("phone"),
+                    "date": target_date,
+                    "status": {"$nin": ["cancelled", "completed"]},
+                })
+                if has_booking:
+                    pick = True
+            if pick:
+                targets.append(c)
 
     # 2) Send messages
     body_tpl = autom.get("template_body") or ""
@@ -1451,6 +1478,9 @@ async def _run_automation(salon_id: str, aid: str) -> int:
             "coupon_code": (coupon or {}).get("code", ""),
             "coupon_title": (coupon or {}).get("title", ""),
             "automation_type": atype,
+            "membership_name": c.get("membership_name") or "",
+            "expiry_date": c.get("expiry_date") or "",
+            "days_left": c.get("days_left") or "",
         }
         result = await _send_one_campaign_message(
             salon_id=salon_id,
