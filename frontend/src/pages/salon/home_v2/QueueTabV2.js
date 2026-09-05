@@ -325,6 +325,7 @@ export default function QueueTabV2({
           </div>
           {view !== 'calendar' && (
             <div className="qv2-dates">
+              <button className={dateMode === 'all' ? 'on' : ''} onClick={() => setDateMode('all')}>All</button>
               <button className={dateMode === 'today' ? 'on' : ''} onClick={() => setDateMode('today')}>Today</button>
               <button className={dateMode === 'yesterday' ? 'on' : ''} onClick={() => setDateMode('yesterday')}>Yesterday</button>
               <button className={dateMode === 'range' ? 'on' : ''} onClick={() => setDateMode('range')}>Range</button>
@@ -362,7 +363,9 @@ export default function QueueTabV2({
         </div>
         {view !== 'calendar' && (
           <div className="qv2-viewinfo">
-            Viewing bookings for <b>{dateMode === 'range'
+            Viewing bookings for <b>{dateMode === 'all'
+              ? 'All bookings (last 90 days)'
+              : dateMode === 'range'
               ? `${dateFrom || '—'} → ${dateTo || '—'}`
               : new Date(date).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</b>
           </div>

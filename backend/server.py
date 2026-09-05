@@ -3863,6 +3863,69 @@ async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: 
     return result
 
 
+async def _finalize_invoice_delivery(invoice_id: str, token_id: str, token: dict,
+                                     salon: dict, invoice_no: str, grand_total: float,
+                                     invoice_html_str, inv_shape: str):
+    """PART 1 — fire-and-forget invoice delivery.
+
+    Runs AFTER the invoice record + token link are already persisted, so a slow
+    or failing PDF render / WhatsApp send can never block or fail the create
+    request. Only ``sent_status`` (and the cached ``pdf_base64``) are updated
+    here — the DB write of the invoice/token is never touched again on failure.
+    """
+    try:
+        # 1) Generate + cache the PDF for the attachment template (URL template
+        #    needs no PDF). Attachment template requires a valid PDF before send.
+        pdf_base64 = None
+        if invoice_html_str and inv_shape != "url":
+            try:
+                from html_pdf import html_to_pdf_bytes
+                import base64 as _b64
+                _pdf_bytes = await asyncio.to_thread(html_to_pdf_bytes, invoice_html_str)
+                if _pdf_bytes:
+                    pdf_base64 = _b64.b64encode(_pdf_bytes).decode("utf-8")
+                    await db.invoices.update_one(
+                        {"id": invoice_id}, {"$set": {"pdf_base64": pdf_base64}}
+                    )
+            except Exception as _pdf_err:
+                logger.error(f"[invoice delivery] PDF generation failed for {invoice_id}: {_pdf_err}")
+                pdf_base64 = None
+
+        if inv_shape != "url" and not pdf_base64:
+            # Attachment template needs a PDF — do NOT send a broken attachment.
+            logger.error(
+                f"[invoice delivery] {invoice_no} ({invoice_id}) PDF not cached — skipping WhatsApp send"
+            )
+            await db.invoices.update_one(
+                {"id": invoice_id}, {"$set": {"sent_status": "pdf_failed"}}
+            )
+            return
+
+        # 2) Deliver via the active WhatsApp provider.
+        try:
+            from whatsapp_service import get_active_provider
+            _provider = get_active_provider()
+            if _provider == "meta":
+                _res = await send_meta_invoice_template(
+                    token, salon, invoice_id, invoice_no, grand_total,
+                )
+                status = _res.get("status") or "sent"
+            else:
+                await _send_booking_notification_impl(token, 'booking_completed')
+                status = "template_sent"
+        except Exception as _wa_err:
+            logger.warning(f"[invoice delivery] WhatsApp send failed for {invoice_id}: {_wa_err}")
+            status = "failed"
+
+        await db.invoices.update_one(
+            {"id": invoice_id}, {"$set": {"sent_status": status}}
+        )
+        logger.info(f"[invoice delivery] {invoice_no} delivery finished status={status}")
+    except Exception as e:
+        logger.error(f"[invoice delivery] unexpected error for {invoice_id}: {e}")
+
+
+
 async def generate_and_send_invoice(token_id: str):
     """Generate invoice PDF and send via WhatsApp"""
     try:
@@ -3962,6 +4025,15 @@ async def generate_and_send_invoice(token_id: str):
         discount_amount = float(token.get('order_discount_amount') or 0)
         if not discount_amount:
             discount_amount = float(token.get('membership_discount') or 0) + float(token.get('coupon_discount') or 0)
+        # PART 6 — queue/appointment bookings store only the membership discount %
+        # (the amount is resolved here at completion). Direct invoices already fold
+        # the membership amount into order_discount_amount / membership_discount, so
+        # the guard below prevents double-counting for those.
+        _mem_pct = float(token.get('membership_discount_percent') or 0)
+        if _mem_pct > 0 and not float(token.get('membership_discount') or 0):
+            _svc_only_subtotal = sum(float(i.get('amount') or 0) for i in render_items)
+            _mem_amt = round(_svc_only_subtotal * _mem_pct / 100.0, 2)
+            discount_amount = round(discount_amount + _mem_amt, 2)
         tip_amount = float(token.get('tip_amount') or 0)
         token.get('coupon_code')
         if token.get('coupon_code'):
@@ -4202,30 +4274,14 @@ async def generate_and_send_invoice(token_id: str):
         except Exception:
             _inv_tmpl_name, _inv_shape = None, "attachment"
 
-        # Fix (Aug 2026) — generate and CACHE the PDF at invoice creation, BEFORE
-        # sending the WhatsApp message (attachment template only). For the URL
-        # template we skip PDF generation entirely per the invoice-URL spec.
-        pdf_base64 = None
-        if invoice_html_str and _inv_shape != "url":
-            try:
-                from html_pdf import html_to_pdf_bytes
-                import base64 as _b64
-                _pdf_bytes = await asyncio.to_thread(html_to_pdf_bytes, invoice_html_str)
-                if _pdf_bytes:
-                    pdf_base64 = _b64.b64encode(_pdf_bytes).decode("utf-8")
-            except Exception as _pdf_err:
-                logger.error(f"invoice PDF generation failed for {invoice_id}: {_pdf_err}")
-                pdf_base64 = None
-
-        # Notify the customer. When WHATSAPP_PROVIDER=meta, deliver the invoice
-        # through the Meta Cloud API template (PDF attachment + review button).
-        # Otherwise fall back to the approved Twilio 'booking_completed' template.
-        # NOTE: the invoice record is stored FIRST (with the cached PDF) so the
-        # PDF attachment URL (/api/invoices/{id}/pdf) resolves instantly when
-        # Meta fetches it.
+        # PART 1 — the DB write of the invoice + token link must be INDEPENDENT of
+        # PDF rendering and WhatsApp/Meta delivery. Persist the invoice record and
+        # link the token NOW (fast, synchronous), then run PDF generation + delivery
+        # in a fire-and-forget background task. A slow/failing render or send can
+        # therefore never block or fail the create request — it only affects
+        # ``sent_status``/``pdf_base64`` after the fact.
         _ = invoice_link  # link is available for the in-app/PDF invoice view
 
-        # Store invoice record (before sending, so the PDF link is live)
         invoice_record = {
             "id": invoice_id,
             "token_id": token_id,
@@ -4236,7 +4292,7 @@ async def generate_and_send_invoice(token_id: str):
             "customer_phone": token.get('phone'),
             "invoice_data": invoice_data,
             "invoice_html": invoice_html_str,
-            "pdf_base64": pdf_base64,
+            "pdf_base64": None,
             "amount": total,
             "sent_at": datetime.now(timezone.utc).isoformat(),
             "sent_status": "pending",
@@ -4244,48 +4300,24 @@ async def generate_and_send_invoice(token_id: str):
         }
         await db.invoices.insert_one(invoice_record)
 
-        if _inv_shape != "url" and not pdf_base64:
-            # Attachment template needs a PDF — do NOT send a WhatsApp with a
-            # broken attachment link. Surface it so it can be retried later.
-            logger.error(
-                f"Invoice {invoice_no} ({invoice_id}) PDF not cached — skipping WhatsApp send"
-            )
-            await db.invoices.update_one(
-                {"id": invoice_id}, {"$set": {"sent_status": "pdf_failed"}}
-            )
-            await db.tokens.update_one(
-                {"id": token_id}, {"$set": {"invoice_id": invoice_id}}
-            )
-            return {"status": "pdf_failed", "invoice_id": invoice_id}
-
-        try:
-            from whatsapp_service import get_active_provider
-            _provider = get_active_provider()
-            if _provider == "meta":
-                _res = await send_meta_invoice_template(
-                    token, salon, invoice_id, invoice_no, grand_total,
-                )
-                result = {"status": _res.get("status") or "sent"}
-            else:
-                await send_booking_notification(token, 'booking_completed')
-                result = {"status": "template_sent"}
-        except Exception as _wa_err:
-            logger.warning(f"invoice WhatsApp send failed: {_wa_err}")
-            result = {"status": "failed"}
-
-        # Update stored status after send
-        await db.invoices.update_one(
-            {"id": invoice_id}, {"$set": {"sent_status": result.get('status')}}
-        )
-
-        # Update token with invoice_id
+        # Link the token to the invoice immediately (write must not wait on send).
         await db.tokens.update_one(
-            {"id": token_id},
-            {"$set": {"invoice_id": invoice_id}}
+            {"id": token_id}, {"$set": {"invoice_id": invoice_id}}
         )
-        
-        logger.info(f"Invoice {invoice_no} generated and link sent to {token.get('phone')}")
-        
+
+        # Dispatch PDF generation + WhatsApp delivery in the background.
+        try:
+            asyncio.create_task(
+                _finalize_invoice_delivery(
+                    invoice_id, token_id, token, salon, invoice_no,
+                    grand_total, invoice_html_str, _inv_shape,
+                )
+            )
+        except Exception as _disp_err:
+            logger.error(f"invoice delivery dispatch failed for {invoice_id}: {_disp_err}")
+
+        logger.info(f"Invoice {invoice_no} persisted; delivery dispatched for {token.get('phone')}")
+
         return {
             "success": True,
             "invoice_id": invoice_id,
@@ -10834,6 +10866,15 @@ async def create_salon_booking(salon_id: str, body: dict, current_user=Depends(g
     # A booking may have no name and/or no number — keep the record either way.
     # Display fallback: entered name → number → generic label.
     display_name = customer_name or phone or "Walk-in Guest"
+
+    # PART 6 — auto-apply the customer's active membership discount (buyer OR a
+    # covered family member) when the salon didn't pass one. Stored as a snapshot
+    # here and resolved into the bill at completion (generate_and_send_invoice).
+    if membership_discount_percent <= 0 and phone:
+        try:
+            membership_discount_percent = await _auto_membership_discount_percent(salon_id, phone)
+        except Exception:
+            membership_discount_percent = 0.0
     
     # Auto-detect current shift if not provided
     if not shift:
@@ -11660,6 +11701,70 @@ async def check_family_membership_coverage(salon_id: str, membership_id: str, ph
         "covered_phones": m.get("covered_phones") or [],
         "detail": None if covered else "This member isn't covered by the family membership.",
     }
+
+
+async def _auto_membership_discount_percent(salon_id: str, phone: str) -> float:
+    """PART 6 — resolve the service-discount % that a customer's ACTIVE membership
+    grants for THIS visit, covering the buyer (customer_phone) AND any covered
+    family member (covered_phones on a family plan). Returns 0.0 when the visitor
+    is not covered by any active membership.
+    """
+    if not phone:
+        return 0.0
+    v10 = _norm10(phone)
+    if not v10:
+        return 0.0
+    variants = _phone_variants(phone)
+    try:
+        cursor = db.customer_memberships.find({
+            "salon_id": salon_id,
+            "is_active": True,
+            "payment_confirmed": True,
+            "$or": [
+                {"customer_phone": {"$in": variants}},
+                {"covered_phones": v10},
+            ],
+        }, {"_id": 0})
+    except Exception:
+        return 0.0
+    best = 0.0
+    async for m in cursor:
+        # Skip expired memberships.
+        try:
+            exp = m.get("expiry_date")
+            if exp and datetime.fromisoformat(exp) < datetime.now(timezone.utc):
+                continue
+        except Exception:
+            pass
+        # Coverage: family plans cover the frozen covered_phones set; non-family
+        # plans cover only the buyer.
+        if m.get("is_family"):
+            covered = v10 in [_norm10(p) for p in (m.get("covered_phones") or [])]
+        else:
+            covered = v10 == _norm10(m.get("customer_phone") or "")
+        if not covered:
+            continue
+        # Resolve the discount %, from the membership first, else the plan.
+        disc = m.get("discount_percent")
+        if disc is None:
+            disc = m.get("discount_percentage")
+        if disc is None and m.get("membership_plan_id"):
+            _p = await db.membership_plans.find_one(
+                {"id": m["membership_plan_id"]},
+                {"_id": 0, "discount_percent": 1, "discount_percentage": 1, "service_discount_pct": 1},
+            ) or {}
+            disc = (_p.get("discount_percent")
+                    if _p.get("discount_percent") is not None
+                    else _p.get("discount_percentage"))
+            if disc is None:
+                disc = _p.get("service_discount_pct")
+        try:
+            disc = float(disc or 0)
+        except (TypeError, ValueError):
+            disc = 0.0
+        best = max(best, disc)
+    return max(0.0, min(100.0, best))
+
 
 
 
@@ -16270,12 +16375,12 @@ async def get_customer_profile(
     ph = (phone or "").strip()
     if not ph:
         raise HTTPException(status_code=400, detail="phone query param required")
-    alt = ph
-    if not ph.startswith("+"):
-        d = "".join(c for c in ph if c.isdigit())
-        if len(d) >= 10:
-            alt = f"+91{d[-10:]}"
-    or_phones = list({ph, alt})
+    # PART 3 — match every stored phone format (10-digit, +91…, 91…, 0…) so a
+    # guest's history is never empty just because tokens were stored differently.
+    or_phones = _phone_variants(ph)
+    if ph.lstrip("+").isdigit() and len(ph.lstrip("+")) == 11 and ph.lstrip("+").startswith("0"):
+        or_phones.append(ph)
+    or_phones = list({p for p in or_phones if p})
 
     master = await db.salon_customers.find_one(
         {"salon_id": salon_id, "phone": {"$in": or_phones}}, {"_id": 0}
@@ -16654,6 +16759,26 @@ async def create_direct_invoice(
             "sold_at": membership_sale_amount,
         }
 
+    # -- PART 6: auto-apply an EXISTING membership's discount --
+    # When the salon isn't selling a NEW membership on this bill, look up the
+    # customer's active membership (buyer OR covered family member) and apply its
+    # service-discount automatically — no manual entry required. A non-covered
+    # visitor resolves to 0% and gets no discount. Applies to services only.
+    if not membership_plan_id and phone:
+        try:
+            _auto_pct = await _auto_membership_discount_percent(salon_id, phone)
+        except Exception:
+            _auto_pct = 0.0
+        if _auto_pct > 0:
+            service_only_subtotal = subtotal - product_subtotal
+            membership_discount = round(service_only_subtotal * _auto_pct / 100.0, 2)
+            membership_info = {
+                "auto_applied": True,
+                "discount_pct": _auto_pct,
+                "discount_amount": membership_discount,
+            }
+
+
     # -- Optional coupon --
     coupon_discount = 0.0
     coupon_doc = None
@@ -16749,6 +16874,7 @@ async def create_direct_invoice(
         "coupon_code": coupon_code,
         "tip_amount": tip_amount,
         "membership_sale_amount": membership_sale_amount,
+        "membership_discount_percent": (membership_info or {}).get("discount_pct", 0) or 0,
         "date": today_str,
         "shift": shift,
         "status": "completed",

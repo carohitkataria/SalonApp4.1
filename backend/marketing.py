@@ -1013,6 +1013,12 @@ class CampaignIn(BaseModel):
     coupon_id: Optional[str] = None
     schedule_at: Optional[str] = None      # ISO datetime, if given → scheduled
     provider: Optional[str] = None         # override provider for this send
+    # PART 7 — media-header marketing templates. When the chosen approved template
+    # has an image/video/document header, the composer attaches a public media URL
+    # (or Meta media id) which is sent as the header component parameter.
+    header_media_url: Optional[str] = None
+    header_media_type: Optional[str] = None  # image | video | document
+    header_media_id: Optional[str] = None    # pre-uploaded Meta media id (alt to URL)
 
 
 def _render(body: str, ctx: Dict[str, Any]) -> str:
@@ -1033,8 +1039,17 @@ async def _send_one_campaign_message(
     body: str,
     provider: Optional[str] = None,
     context: Optional[Dict[str, Any]] = None,
+    template_name: Optional[str] = None,
+    template_params: Optional[List[str]] = None,
+    lang_code: str = "en_US",
+    header_params: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Send a single message and record a marketing_messages row."""
+    """Send a single message and record a marketing_messages row.
+
+    When `template_name` + `header_params` are supplied (PART 7 — media-header
+    marketing template), the message is delivered as an approved template with
+    the media in its header component. Otherwise a plain text body is sent.
+    """
     from whatsapp_service import send_whatsapp_message, get_active_provider
 
     active = (provider or get_active_provider()).lower()
@@ -1052,7 +1067,19 @@ async def _send_one_campaign_message(
     }
     await _db.marketing_messages.insert_one(doc)
 
-    result = await send_whatsapp_message(to_phone, text=body, force_provider=active)
+    if template_name and active == "meta":
+        result = await send_whatsapp_message(
+            to_phone,
+            text=body,
+            template_name=template_name,
+            template_params=template_params or [],
+            lang_code=lang_code,
+            header_params=header_params,
+            force_provider=active,
+            salon_id=salon_id,
+        )
+    else:
+        result = await send_whatsapp_message(to_phone, text=body, force_provider=active)
     upd: Dict[str, Any] = {"provider_result": result, "status": result.get("status", "failed")}
     if result.get("status") == "sent":
         upd["sent_at"] = _now_iso()
@@ -1110,6 +1137,27 @@ async def _run_campaign(salon_id: str, campaign_id: str) -> None:
     if campaign.get("coupon_id"):
         coupon = await _db.salon_coupons.find_one({"id": campaign["coupon_id"], "salon_id": salon_id})
 
+    # PART 7 — when the campaign uses an APPROVED template that carries a media
+    # header (image/video/document) and the composer attached a media URL / id,
+    # send as a real template with that media in its header component.
+    tmpl_name = None
+    tmpl_lang = "en_US"
+    header_params = None
+    tmpl = None
+    if campaign.get("template_id"):
+        tmpl = await _db.salon_templates.find_one(
+            {"id": campaign["template_id"], "salon_id": salon_id})
+    _media_type = (campaign.get("header_media_type") or "").lower()
+    _media_url = campaign.get("header_media_url")
+    _media_id = campaign.get("header_media_id")
+    if (tmpl and (tmpl.get("meta_status") == "approved")
+            and _media_type in ("image", "video", "document")
+            and (_media_url or _media_id)):
+        tmpl_name = tmpl.get("name")
+        tmpl_lang = tmpl.get("lang_code") or tmpl.get("language") or "en_US"
+        _media_obj = {"id": _media_id} if _media_id else {"link": _media_url}
+        header_params = [{"type": _media_type, _media_type: _media_obj}]
+
     recipients = await _resolve_campaign_recipients(salon_id, campaign)
     stats = {"sent": 0, "failed": 0, "delivered": 0, "read": 0}
     for r in recipients:
@@ -1124,6 +1172,9 @@ async def _run_campaign(salon_id: str, campaign_id: str) -> None:
             "coupon_value": str((coupon or {}).get("value", "")),
         }
         body = _render(body_tpl, ctx)
+        # Best-effort body params for the template send: map the first {{N}} to
+        # the guest's first name (the common "Hi {{1}}" shape).
+        _tmpl_params = [ctx["name"]] if (tmpl_name and "{{" in (tmpl.get("body") or "")) else []
         result = await _send_one_campaign_message(
             salon_id=salon_id,
             campaign_id=campaign_id,
@@ -1131,6 +1182,10 @@ async def _run_campaign(salon_id: str, campaign_id: str) -> None:
             body=body,
             provider=campaign.get("provider"),
             context=ctx,
+            template_name=tmpl_name,
+            template_params=_tmpl_params,
+            lang_code=tmpl_lang,
+            header_params=header_params,
         )
         if result["status"] in ("sent", "mock"):
             stats["sent"] += 1

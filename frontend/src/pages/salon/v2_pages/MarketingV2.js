@@ -1501,6 +1501,10 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
   const [scheduleAt, setScheduleAt] = useState('');
   const [saving, setSaving] = useState(false);
   const [audience, setAudience] = useState(null); // { count, estimated_spend_inr }
+  // PART 7 — media-header template attachment
+  const [headerMediaUrl, setHeaderMediaUrl] = useState('');
+  const [headerMediaId, setHeaderMediaId] = useState('');
+  const [uploadingMedia, setUploadingMedia] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -1514,14 +1518,24 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
       setBody(initial.template_body || '');
       setCouponId(initial.coupon_id || '');
       setScheduleAt(initial.schedule_at ? String(initial.schedule_at).slice(0, 16) : '');
+      setHeaderMediaUrl(initial.header_media_url || '');
+      setHeaderMediaId(initial.header_media_id || '');
     } else {
       setName(''); setAudienceMode('segment'); setSegId(preselectSegmentId || ''); setAdHocPhones('');
       setChannel('whatsapp'); setTmplId(''); setBody(''); setCouponId(''); setScheduleAt('');
+      setHeaderMediaUrl(''); setHeaderMediaId('');
     }
     setAudience(null);
   }, [open, initial, preselectSegmentId]);
 
   const phonesArr = useMemo(() => adHocPhones.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean), [adHocPhones]);
+
+  // PART 7 — the selected template's media-header type (image/video/document), if any.
+  const selectedTmpl = useMemo(() => templates.find(x => x.id === tmplId), [templates, tmplId]);
+  const mediaHeader = useMemo(() => {
+    const f = String(selectedTmpl?.header_format || '').toUpperCase();
+    return ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(f) ? f.toLowerCase() : '';
+  }, [selectedTmpl]);
 
   // Live recipient + cost estimate
   useEffect(() => {
@@ -1545,6 +1559,30 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
     setTmplId(id);
     const t = templates.find(x => x.id === id);
     if (t) setBody(t.body || '');
+    // Reset any previously attached media when the template changes.
+    setHeaderMediaUrl('');
+    setHeaderMediaId('');
+  };
+
+  const uploadHeaderMedia = async (file) => {
+    if (!file) return;
+    setUploadingMedia(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await axios.post(
+        `${API}/salons/${salonId}/media/upload`, fd,
+        { headers: { ...authHeaders(), 'Content-Type': 'multipart/form-data' } });
+      // Prefer a public URL when the server returns one; else use the Meta handle
+      // as a media id (works once the number is live).
+      const url = res.data?.url || res.data?.link || '';
+      const handle = res.data?.handle || res.data?.media_id || '';
+      if (url) { setHeaderMediaUrl(url); setHeaderMediaId(''); }
+      else if (handle) { setHeaderMediaId(handle); }
+      toast.success(res.data?.mock ? 'Media attached (MOCK handle)' : 'Media uploaded');
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Media upload failed');
+    } finally { setUploadingMedia(false); }
   };
 
   const submit = async (launchNow) => {
@@ -1552,6 +1590,9 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
     if (!body.trim()) { toast.error('Message body required (pick a template or write custom)'); return; }
     if (audienceMode === 'segment' && !segId) { toast.error('Pick an audience segment (or switch to specific phones)'); return; }
     if (audienceMode === 'phones' && phonesArr.length === 0) { toast.error('Add at least one phone number'); return; }
+    if (mediaHeader && !headerMediaUrl.trim() && !headerMediaId.trim()) {
+      toast.error('This template has a media header — attach an image/file or paste a public URL'); return;
+    }
     setSaving(true);
     try {
       const payload = {
@@ -1563,6 +1604,9 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
         coupon_id: couponId || null,
         provider: channel === 'whatsapp' ? null : channel,
         schedule_at: (!launchNow && scheduleAt) ? new Date(scheduleAt).toISOString() : null,
+        header_media_type: mediaHeader || null,
+        header_media_url: mediaHeader ? (headerMediaUrl.trim() || null) : null,
+        header_media_id: mediaHeader ? (headerMediaId.trim() || null) : null,
       };
       let cid = initial?.id;
       if (editing) {
@@ -1633,6 +1677,40 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
           {templates.map(t => <option key={t.id} value={t.id}>{t.name} ({t.meta_status || 'draft'})</option>)}
         </select>
       </div>
+      {mediaHeader && (
+        <div className="v2-field">
+          <label>Header {mediaHeader} (required for this template)</label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              placeholder={`Public HTTPS ${mediaHeader} URL`}
+              value={headerMediaUrl}
+              onChange={(e) => { setHeaderMediaUrl(e.target.value); setHeaderMediaId(''); }}
+              data-testid="campaign-header-media-url"
+              style={{ flex: 1, minWidth: 200 }}
+            />
+            <label className="btn-ghost" style={{ cursor: 'pointer', whiteSpace: 'nowrap' }}>
+              {uploadingMedia ? 'Uploading…' : 'Upload'}
+              <input
+                type="file"
+                accept={mediaHeader === 'image' ? 'image/*' : mediaHeader === 'video' ? 'video/*' : 'application/pdf'}
+                style={{ display: 'none' }}
+                disabled={uploadingMedia}
+                onChange={(e) => uploadHeaderMedia(e.target.files?.[0])}
+              />
+            </label>
+          </div>
+          {headerMediaUrl && mediaHeader === 'image' && (
+            <img src={headerMediaUrl} alt="header preview" style={{ marginTop: 8, maxHeight: 120, borderRadius: 8, border: '1px solid #E4E4EF' }} />
+          )}
+          {headerMediaId && !headerMediaUrl && (
+            <div style={{ marginTop: 6, fontSize: 12, color: '#6C4FE0' }}>Attached media id: {headerMediaId}</div>
+          )}
+          <p style={{ marginTop: 6, fontSize: 11.5, color: '#8A8F9E' }}>
+            The image must be a public HTTPS link (or an uploaded media handle). It is sent in the template header.
+          </p>
+        </div>
+      )}
       <div className="v2-field"><label>Message body</label>
         <textarea placeholder="Hi {{name}}, we miss you! Here's 20% off…" value={body} onChange={(e) => setBody(e.target.value)} data-testid="campaign-body-input" />
       </div>

@@ -204,7 +204,7 @@ export default function EnhancedSalonDashboard() {
     const shifted = new Date(Date.UTC(y, m - 1, d + daysOffset));
     return fmt.format(shifted);
   };
-  const [dateMode, setDateMode] = useState('today'); // 'today' | 'yesterday' | 'range'
+  const [dateMode, setDateMode] = useState('all'); // 'all' | 'today' | 'yesterday' | 'range'
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const date = dateMode === 'yesterday' ? getISTDateOffset(-1) : getISTDateOffset(0);
@@ -501,12 +501,22 @@ export default function EnhancedSalonDashboard() {
       // date_from/date_to, send both to backend so /queue can return tokens
       // spanning multiple days (previously ignored).
       const isRange = dateMode === 'range' && dateFrom && dateTo;
+      // PART 2 — "All / History" default: show every booking (walk-ins, scheduled
+      // and direct invoices) across a wide window so history is visible and
+      // survives refresh. Backed by /queue's date_from/date_to range support.
+      const isAll = dateMode === 'all';
+      const allFrom = getISTDateOffset(-90);
+      const allTo = getISTDateOffset(1); // include tomorrow's scheduled bookings
       if (selectedBarber === 'all') {
-        url = isRange
+        url = isAll
+          ? `${API}/salons/${id}/queue?date_from=${allFrom}&date_to=${allTo}`
+          : isRange
           ? `${API}/salons/${id}/queue?date_from=${dateFrom}&date_to=${dateTo}`
           : `${API}/salons/${id}/queue?date=${date}`;
       } else {
-        url = isRange
+        url = isAll
+          ? `${API}/salons/${id}/barbers/${selectedBarber}/queue?date_from=${allFrom}&date_to=${allTo}`
+          : isRange
           ? `${API}/salons/${id}/barbers/${selectedBarber}/queue?date_from=${dateFrom}&date_to=${dateTo}`
           : `${API}/salons/${id}/barbers/${selectedBarber}/queue?date=${date}`;
       }

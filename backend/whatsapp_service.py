@@ -222,6 +222,7 @@ async def send_whatsapp_message(
     lang_code: str = "en_US",
     force_provider: Optional[str] = None,
     salon_id: Optional[str] = None,
+    header_params: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Unified sender used by non-OTP flows.
 
@@ -231,6 +232,8 @@ async def send_whatsapp_message(
         - If `template_name` is set → template send (Meta only; if provider is
           twilio we fall back to sending the pre-rendered `text`).
         - Else → plain text.
+    * `header_params` lets a template send include a media header (image/video/
+      document) — e.g. [{"type":"image","image":{"link": PUBLIC_URL}}].
     * Returns a dict {status, provider, ...}
     """
     provider = (force_provider or get_active_provider()).lower()
@@ -242,6 +245,7 @@ async def send_whatsapp_message(
                 template_name=template_name,
                 lang_code=lang_code,
                 body_params=template_params or [],
+                header_params=header_params,
                 salon_id=salon_id,
             )
         if text:

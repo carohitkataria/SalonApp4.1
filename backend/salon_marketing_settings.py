@@ -586,6 +586,14 @@ async def embedded_signup_complete(salon_id: str, body: ESCompleteIn, request: R
     now = _now_iso()
 
     access_token: Optional[str] = None
+    # PART 5 — if the salon actually attempted a real Embedded Signup (a code was
+    # returned by FB.login) but the platform Meta app isn't configured, say so
+    # clearly with a 400 instead of silently mocking or 500-ing. The UI then falls
+    # back to Manual connect.
+    if body.code and not _meta_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="Embedded signup is not configured on this server — use Manual connect instead.")
     mock = not (_meta_enabled() and body.code)
 
     if not mock:
@@ -689,6 +697,107 @@ async def waba_request(salon_id: str, body: ManualConnectIn, request: Request):
     )
     return {"ok": True, "status": conn["status"],
             "sender_phone_e164": conn["sender_phone_e164"], "display_name": conn["display_name"]}
+
+
+@settings_router.post("/salons/{salon_id}/marketing/settings/waba/manual-connect")
+async def waba_manual_connect(salon_id: str, body: ManualConnectIn, request: Request):
+    """PART 5 — Manually connect a salon's OWN WhatsApp Cloud API number using its
+    WABA ID, Phone Number ID and a (permanent) access token — no Embedded Signup /
+    App Review required.
+
+    The credentials are verified against the Meta Graph API. On ANY problem we
+    return a structured HTTP 400 with the real reason (never a 500), so the UI can
+    show it inline as a form error and keep the Manual-connect option usable.
+    """
+    user = await _require_admin(request)
+    _assert_salon_scope(user, salon_id)
+
+    waba_id = (body.waba_id or "").strip()
+    phone_number_id = (body.phone_number_id or "").strip()
+    access_token = (body.access_token or "").strip()
+    if not (waba_id and phone_number_id and access_token):
+        raise HTTPException(
+            status_code=400,
+            detail="WABA ID, Phone Number ID and access token are all required.")
+
+    now = _now_iso()
+    verified = False
+    mock = False
+    sender = (body.sender_phone_e164 or "").strip() or None
+    display = (body.display_name or "").strip() or None
+
+    if access_token.startswith("mock"):
+        # Preview / dev token — accept without a live Meta call.
+        mock = True
+    else:
+        base = _graph_base()
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.get(
+                    f"{base}/{phone_number_id}",
+                    params={"access_token": access_token,
+                            "fields": "display_phone_number,verified_name,quality_rating"},
+                )
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            if r.status_code != 200 or (isinstance(data, dict) and data.get("error")):
+                err = ((data.get("error") or {}).get("message")
+                       if isinstance(data, dict) else None) \
+                    or f"Meta verification failed (HTTP {r.status_code})."
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not verify WhatsApp credentials: {err}")
+            verified = True
+            sender = sender or data.get("display_phone_number")
+            display = display or data.get("verified_name")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not reach Meta to verify credentials: {e}")
+
+    conn = {
+        "salon_id": salon_id,
+        "provider": "meta",
+        "waba_id": waba_id,
+        "phone_number_id": phone_number_id,
+        "access_token": access_token,
+        "sender_phone_e164": sender,
+        "display_name": display,
+        "status": "connected",
+        "verified": verified,
+        "mock": mock,
+        "connected_via": "manual",
+        "connected_at": now,
+        "updated_at": now,
+    }
+    await _db.salon_channel_connections.update_one(
+        {"salon_id": salon_id, "provider": "meta"},
+        {"$set": conn, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    provisioned = []
+    try:
+        provisioned = await provision_templates_for_waba(waba_id, access_token)
+    except Exception:
+        provisioned = []
+
+    return {
+        "ok": True,
+        "mock": mock,
+        "verified": verified,
+        "status": "connected",
+        "waba_id": waba_id,
+        "phone_number_id": phone_number_id,
+        "sender_phone_e164": sender,
+        "display_name": display,
+        "templates_provisioned": provisioned,
+    }
+
 
 
 @settings_router.get("/salons/{salon_id}/marketing/settings/waba/status")
