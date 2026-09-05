@@ -741,9 +741,10 @@ export default function AppointmentDrawer({
       };
 
       const editTok = editTokenRef.current;
+      let savedToken = null;
       if (editTok && editTok.id) {
         // In-place MODIFY — update the same booking (no new token).
-        await axios.put(`${API}/salons/${sid}/salon-booking/${editTok.id}`, {
+        const _r = await axios.put(`${API}/salons/${sid}/salon-booking/${editTok.id}`, {
           customer_name: effName || editTok.customer_name || '',
           phone: effPhone || editTok.phone || '',
           gender: customer?.gender || editTok.customer_gender || 'Men',
@@ -757,8 +758,10 @@ export default function AppointmentDrawer({
           ...paymentPayload,
           ...billingExtras,
         }, { headers });
+        // PUT returns the full updated token.
+        savedToken = (_r && _r.data && _r.data.id) ? _r.data : null;
       } else if (mode === 'direct') {
-        await axios.post(`${API}/salons/${sid}/direct-invoice`, {
+        const _r = await axios.post(`${API}/salons/${sid}/direct-invoice`, {
           customer_name: effName, phone: effPhone, gender: customer?.gender || 'Men',
           barber_id: staffId,
           selected_services: selectedSvc,
@@ -769,8 +772,10 @@ export default function AppointmentDrawer({
           ...billingExtras,
           source: 'direct',
         }, { headers });
+        // direct-invoice returns { ..., token: <full token> }.
+        savedToken = (_r && _r.data && _r.data.token && _r.data.token.id) ? _r.data.token : null;
       } else {
-        await axios.post(`${API}/salons/${sid}/salon-booking`, {
+        const _r = await axios.post(`${API}/salons/${sid}/salon-booking`, {
           customer_name: effName, phone: effPhone, gender: customer?.gender || 'Men',
           barber_id: staffId || 'any',
           selected_services: selectedSvc,
@@ -785,8 +790,10 @@ export default function AppointmentDrawer({
           source: mode === 'queue' ? 'qr' : 'owner',
           booking_type: mode,
         }, { headers });
+        // salon-booking returns the full created token.
+        savedToken = (_r && _r.data && _r.data.id) ? _r.data : null;
       }
-      onSaved?.({ mode, total: payable });
+      onSaved?.({ mode, total: payable, token: savedToken });
       onClose?.();
     } catch (e) {
       setErrors({ save: formatApiError(e, 'Save failed') });

@@ -360,7 +360,7 @@ export default function HomeV2Shell({
       <AppointmentDrawer
         open={apptOpen}
         onClose={() => { setApptOpen(false); setApptPreset(null); setApptEditToken(null); }}
-        onSaved={() => { setApptOpen(false); setApptPreset(null); setApptEditToken(null); onSaved?.(); toast.success('Appointment saved'); }}
+        onSaved={(info) => { setApptOpen(false); setApptPreset(null); setApptEditToken(null); onSaved?.(info); toast.success('Appointment saved'); }}
         getAuthHeaders={getAuthHeaders}
         salonId={salonId}
         defaultMode="queue"

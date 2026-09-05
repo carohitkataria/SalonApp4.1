@@ -16838,6 +16838,9 @@ async def create_direct_invoice(
         "token_id": token_id,
         "token_number": token_number,
         "invoice_id": invoice_id,
+        # Return the full created token (minus Mongo's _id) so the Bookings list
+        # can insert this single record incrementally — no full re-fetch / blank flash.
+        "token": {k: v for k, v in token_doc.items() if k != "_id"},
         "totals": {
             "subtotal": round(subtotal, 2),
             "membership_discount": membership_discount,

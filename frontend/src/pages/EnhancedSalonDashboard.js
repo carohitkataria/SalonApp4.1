@@ -1313,7 +1313,24 @@ export default function EnhancedSalonDashboard() {
       activeTab={activeTab}
       unreadNotifCount={unreadNotifCount}
       onLogout={handleLogout}
-      onSaved={() => { try { fetchBarbers?.(); setTimeout(() => fetchTokens?.(), 1500); } catch (_) { /* ignore */ } }}
+      onSaved={(info) => {
+        try {
+          fetchBarbers?.();
+          const rec = info && info.token;
+          if (rec && rec.id) {
+            // Incremental: insert/merge the single new (or updated) record into
+            // the existing list — no full re-fetch, so the on-screen rows never
+            // blank out. QueueTabV2 re-sorts, so the row lands in the right spot.
+            upsertTokenLocal(rec);
+            fetchDailySales?.(salonId);
+          } else {
+            // Fallback ONLY when the create response didn't carry the record:
+            // a non-blanking background refresh (setTokens replaces once data arrives).
+            fetchTokens?.(salonId);
+            fetchDailySales?.(salonId);
+          }
+        } catch (_) { /* ignore */ }
+      }}
     >
     <div className="min-h-screen bg-background text-foreground">
       <div className="w-full px-3 md:px-5 py-4">
