@@ -3623,7 +3623,147 @@ async def _event_template(salon_id: str, event: str, default_name: str) -> str:
     return default_name
 
 
-async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: str,
+# ---------------------------------------------------------------------------
+# Second invoice template (URL) + attachment template — MD (Sep 2026).
+# The Event-Template selector reads `salon_templates` filtered to the invoice
+# group. We seed BOTH invoice templates so the Invoice event dropdown lists
+# them by name and `send_meta_invoice_template` can adapt to the chosen shape.
+# ---------------------------------------------------------------------------
+INVOICE_URL_BODY = (
+    "\U0001F4C4 Invoice Generated\n\n"
+    "Hello {{1}}!\n\n"
+    "Your service at {{2}} is complete.\n\n"
+    "Invoice #{{3}}\n"
+    "Total Amount: \u20B9{{4}}\n\n"
+    "\U0001F517 View/Download Invoice:\n"
+    "{{5}}\n\n"
+    "Thank you for visiting us! \U0001F488"
+)
+
+_REVIEW_BUTTON = {
+    "type": "BUTTONS",
+    "buttons": [
+        {"type": "URL", "text": "Write a Review",
+         "url": "https://salonhub.in/{{1}}", "example": ["https://salonhub.in/r/abc123"]},
+    ],
+}
+
+INVOICE_EVENT_TEMPLATES = [
+    {
+        "name": "invoice_default_1_attachment",
+        "friendly_name": "Invoice — PDF attachment",
+        "category": "utility",
+        "lang_code": "en",
+        "group": "invoice",
+        "shape": "attachment",
+        "components": [
+            {"type": "HEADER", "format": "DOCUMENT",
+             "example": {"header_handle": ["https://salonhub.in/sample-invoice.pdf"]}},
+            {"type": "BODY",
+             "text": "Hi {{1}}, thanks for visiting {{2}}! Your invoice #{{3}} for \u20B9{{4}} is attached.",
+             "example": {"body_text": [["Aarav", "Glam Studio", "1042", "899"]]}},
+            {"type": "FOOTER", "text": "Powered by SalonHub"},
+            _REVIEW_BUTTON,
+        ],
+    },
+    {
+        "name": "invoice_default_1_invoice_url",
+        "friendly_name": "Invoice — view link (no PDF)",
+        "category": "utility",
+        "lang_code": "en",
+        "group": "invoice",
+        "shape": "url",
+        "components": [
+            {"type": "BODY", "text": INVOICE_URL_BODY,
+             "example": {"body_text": [["Aarav", "Glam Studio", "1042", "899",
+                                        "https://salonhub.in/i/abc123"]]}},
+            _REVIEW_BUTTON,
+        ],
+    },
+]
+
+
+def _invoice_template_shape(components) -> str:
+    """Classify a template's shape from its stored components.
+
+    Returns 'attachment' when it has a DOCUMENT header, else 'url' when the body
+    carries 5 variables ({{5}} = the view link), else 'attachment' as the safe
+    default (matches the legacy behaviour)."""
+    comps = components or []
+    has_doc_header = any(
+        (c.get("type") or "").upper() == "HEADER"
+        and (c.get("format") or "").upper() == "DOCUMENT"
+        for c in comps if isinstance(c, dict)
+    )
+    if has_doc_header:
+        return "attachment"
+    body = next((c for c in comps if isinstance(c, dict) and (c.get("type") or "").upper() == "BODY"), None)
+    if body:
+        var_nums = {int(m) for m in re.findall(r"\{\{\s*(\d+)\s*\}\}", body.get("text") or "")}
+        if 5 in var_nums or len(var_nums) >= 5:
+            return "url"
+    return "attachment"
+
+
+async def _resolve_invoice_template(salon_id: str):
+    """Resolve the salon's chosen invoice template name + shape + stored doc.
+
+    Falls back to the attachment template when nothing is bound."""
+    default_name = os.environ.get("META_WA_INVOICE_TEMPLATE_NAME") or "invoice_default_1_attachment"
+    name = await _event_template(salon_id, "invoice", default_name)
+    doc = await db.salon_templates.find_one(
+        {"salon_id": salon_id, "name": name}, {"_id": 0}
+    )
+    if not doc:
+        # Fall back to a bundled definition so shape detection still works even
+        # if the per-salon row is missing.
+        bundled = next((t for t in INVOICE_EVENT_TEMPLATES if t["name"] == name), None)
+        components = (bundled or {}).get("components")
+    else:
+        components = doc.get("components") or (doc.get("meta_payload") or {}).get("components")
+    shape = _invoice_template_shape(components)
+    return name, shape, (doc or {})
+
+
+async def seed_invoice_event_templates():
+    """Idempotently ensure BOTH invoice templates exist in platform_template_library
+    (as samples) AND in every salon's `salon_templates` (group='invoice',
+    meta_status='approved') so they appear in the Invoice event dropdown."""
+    now = datetime.now(timezone.utc).isoformat()
+    # 1) Platform library samples.
+    for t in INVOICE_EVENT_TEMPLATES:
+        await db.platform_template_library.update_one(
+            {"name": t["name"]},
+            {"$set": {
+                "name": t["name"], "friendly_name": t["friendly_name"],
+                "category": t["category"], "lang_code": t["lang_code"],
+                "group": "invoice", "auto_provision": True, "enabled_for_salons": True,
+                "meta_payload": {"name": t["name"], "category": t["category"].upper(),
+                                 "language": t["lang_code"], "components": t["components"]},
+                "updated_at": now,
+            }, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+            upsert=True,
+        )
+    # 2) Per-salon salon_templates rows.
+    salon_ids = await db.salons.distinct("id")
+    for sid in salon_ids:
+        for t in INVOICE_EVENT_TEMPLATES:
+            await db.salon_templates.update_one(
+                {"salon_id": sid, "name": t["name"]},
+                {"$set": {
+                    "salon_id": sid, "name": t["name"], "friendly_name": t["friendly_name"],
+                    "category": t["category"], "lang_code": t["lang_code"], "group": "invoice",
+                    "meta_status": "approved", "shape": t["shape"],
+                    "components": t["components"],
+                    "meta_payload": {"name": t["name"], "category": t["category"].upper(),
+                                     "language": t["lang_code"], "components": t["components"]},
+                    "updated_at": now,
+                }, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+                upsert=True,
+            )
+    logger.info(f"[STARTUP] invoice event templates ensured for {len(salon_ids)} salon(s)")
+
+
                                      invoice_no: str, amount) -> dict:
     """Send the invoice-delivery WhatsApp message via the Meta Cloud API template.
 
@@ -3649,16 +3789,15 @@ async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: 
         logger.info(f"[Meta invoice] suppressed by customer settings for {phone}")
         return {"status": "suppressed", "reason": "customer_setting_off"}
 
-    template_name = await _event_template(
-        salon_id, "invoice",
-        os.environ.get("META_WA_INVOICE_TEMPLATE_NAME") or "invoice_generated")
-    lang_code = os.environ.get("META_WA_INVOICE_TEMPLATE_LANG") or "en_US"
+    template_name, tmpl_shape, tmpl_doc = await _resolve_invoice_template(salon_id)
+    lang_code = tmpl_doc.get("lang_code") or os.environ.get("META_WA_INVOICE_TEMPLATE_LANG") or "en_US"
     review_path_tpl = os.environ.get("META_WA_INVOICE_REVIEW_PATH") or "review/{token_id}"
 
     public_base = (os.environ.get("PUBLIC_BASE_URL")
                    or os.getenv("REACT_APP_BACKEND_URL")
                    or "").rstrip("/")
     pdf_link = f"{public_base}/api/invoices/{invoice_id}/pdf" if public_base else ""
+    view_link = f"{public_base}/api/invoices/{invoice_id}/view" if public_base else ""
 
     # Body variables — plain values (₹ symbol lives in the template text itself).
     try:
@@ -3669,13 +3808,20 @@ async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: 
     customer_name = token_data.get('customer_name') or 'Customer'
     salon_name = (salon or {}).get('salon_name') or 'our salon'
 
-    # Header — DOCUMENT attachment (the invoice PDF).
-    header_params = None
-    if pdf_link:
-        header_params = [{
-            "type": "document",
-            "document": {"link": pdf_link, "filename": f"Invoice_{invoice_no}.pdf"},
-        }]
+    # Adapt the components to the CHOSEN template's shape:
+    #  • attachment → DOCUMENT header (the PDF) + body {{1}}–{{4}}
+    #  • url        → NO header + body {{1}}–{{5}} where {{5}} = the view link
+    if tmpl_shape == "url":
+        header_params = None
+        body_params = [customer_name, salon_name, str(invoice_no), amount_str, view_link]
+    else:
+        header_params = None
+        if pdf_link:
+            header_params = [{
+                "type": "document",
+                "document": {"link": pdf_link, "filename": f"Invoice_{invoice_no}.pdf"},
+            }]
+        body_params = [customer_name, salon_name, str(invoice_no), amount_str]
 
     # Button — dynamic URL suffix for the review page (base URL lives in the template).
     review_suffix = review_path_tpl.format(salon_id=salon_id, invoice_id=invoice_id,
@@ -3687,8 +3833,6 @@ async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: 
         "index": "0",
         "parameters": [{"type": "text", "text": review_suffix}],
     }]
-
-    body_params = [customer_name, salon_name, str(invoice_no), amount_str]
 
     try:
         from whatsapp_service import send_meta_template
@@ -4049,14 +4193,19 @@ async def generate_and_send_invoice(token_id: str):
         except Exception as _html_err:
             logger.warning(f"invoice HTML render skipped: {_html_err}")
 
+        # Resolve the salon's chosen invoice template SHAPE up-front so we know
+        # whether a PDF is required. Attachment template → PDF mandatory; URL
+        # template → no PDF (the customer opens the view link).
+        try:
+            _inv_tmpl_name, _inv_shape, _ = await _resolve_invoice_template(token['salon_id'])
+        except Exception:
+            _inv_tmpl_name, _inv_shape = None, "attachment"
+
         # Fix (Aug 2026) — generate and CACHE the PDF at invoice creation, BEFORE
-        # sending the WhatsApp message. In production the on-the-fly headless-Chrome
-        # render was unreliable when Meta fetched the attachment link, so the whole
-        # invoice message failed. We now render the PDF once here, store pdf_base64
-        # on the invoice record, and only send WhatsApp if the PDF was stored — a
-        # broken attachment link is worse than a delayed/retried message.
+        # sending the WhatsApp message (attachment template only). For the URL
+        # template we skip PDF generation entirely per the invoice-URL spec.
         pdf_base64 = None
-        if invoice_html_str:
+        if invoice_html_str and _inv_shape != "url":
             try:
                 from html_pdf import html_to_pdf_bytes
                 import base64 as _b64
@@ -4094,8 +4243,8 @@ async def generate_and_send_invoice(token_id: str):
         }
         await db.invoices.insert_one(invoice_record)
 
-        if not pdf_base64:
-            # PDF could not be generated/stored — do NOT send a WhatsApp with a
+        if _inv_shape != "url" and not pdf_base64:
+            # Attachment template needs a PDF — do NOT send a WhatsApp with a
             # broken attachment link. Surface it so it can be retried later.
             logger.error(
                 f"Invoice {invoice_no} ({invoice_id}) PDF not cached — skipping WhatsApp send"
@@ -21529,6 +21678,13 @@ async def startup_event():
         await seed_test_data_main()
     except Exception as e:
         logger.error(f"[STARTUP] seed_test_data failed: {e}")
+    # Second invoice template (URL) + attachment template — ensure both invoice
+    # event templates exist so the Invoice event dropdown lists them and the
+    # adaptive sender can match each shape.
+    try:
+        await seed_invoice_event_templates()
+    except Exception as e:
+        logger.error(f"[STARTUP] seed_invoice_event_templates failed: {e}")
     # Fix (Aug 2026) — backfill legacy booking records missing source/booking_type.
     # Older tokens predate these fields; without them the queue/list endpoints
     # (response_model=List[TokenModel]) errored out and the Bookings tab came

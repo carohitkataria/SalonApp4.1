@@ -1,12 +1,14 @@
 """
-html_pdf.py — Render an HTML string to a real PDF using the system headless
-Chrome/Chromium binary.
+html_pdf.py — Render an HTML string to a real PDF.
 
-This is used so the WhatsApp invoice attachment (application/pdf) is produced
-from the SAME HTML that powers the on-screen `/api/invoices/{id}/view` page —
-guaranteeing the customer's PDF matches the web invoice exactly. The old
-ReportLab generator (invoice_service.generate_invoice_pdf) is retired from all
-customer-facing paths.
+Primary renderer: WeasyPrint (browserless, in-memory, distortion-free, free).
+This produces the WhatsApp invoice attachment (application/pdf) from the SAME
+HTML that powers the on-screen `/api/invoices/{id}/view` page — guaranteeing the
+customer's PDF matches the web invoice exactly.
+
+WeasyPrint needs only native libs (pango/cairo/gdk-pixbuf) — no browser. A
+headless-Chrome fallback is kept ONLY as a safety net for environments where
+WeasyPrint can't load; the old ReportLab generator is fully retired.
 """
 
 from __future__ import annotations
@@ -21,8 +23,25 @@ import uuid
 logger = logging.getLogger(__name__)
 
 
+def _public_base_url() -> str:
+    return (
+        os.environ.get("PUBLIC_BASE_URL")
+        or os.environ.get("BACKEND_PUBLIC_URL")
+        or os.environ.get("REACT_APP_BACKEND_URL")
+        or ""
+    ).rstrip("/")
+
+
+def _weasyprint_pdf(html_str: str) -> bytes:
+    """Render HTML → PDF bytes fully in-memory with WeasyPrint (no temp files)."""
+    from weasyprint import HTML  # imported lazily so a missing lib never crashes import
+
+    base_url = _public_base_url() or None
+    return HTML(string=html_str, base_url=base_url).write_pdf()
+
+
 def _find_chrome() -> str | None:
-    """Locate a usable headless Chrome/Chromium binary."""
+    """Locate a usable headless Chrome/Chromium binary (fallback only)."""
     candidates = [
         os.environ.get("CHROME_BIN"),
         "google-chrome",
@@ -41,49 +60,40 @@ def _find_chrome() -> str | None:
     return None
 
 
-def html_to_pdf_bytes(html_str: str, timeout: int = 45) -> bytes:
-    """Convert an HTML string to PDF bytes via headless Chrome.
-
-    Raises RuntimeError if Chrome is unavailable or the render fails.
-    """
+def _chromium_pdf(html_str: str, timeout: int = 45) -> bytes:
+    """Fallback renderer via headless Chrome (only if WeasyPrint is unavailable)."""
     chrome = _find_chrome()
     if not chrome:
-        raise RuntimeError("No Chrome/Chromium binary available for HTML->PDF")
-
+        raise RuntimeError("No Chrome/Chromium binary available for HTML->PDF fallback")
     workdir = tempfile.mkdtemp(prefix="invpdf_")
     html_path = os.path.join(workdir, f"{uuid.uuid4().hex}.html")
     pdf_path = os.path.join(workdir, f"{uuid.uuid4().hex}.pdf")
     try:
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_str)
-
         cmd = [
-            chrome,
-            "--headless=new",
-            "--no-sandbox",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
-            "--no-pdf-header-footer",
-            "--run-all-compositor-stages-before-draw",
-            "--virtual-time-budget=4000",
-            f"--print-to-pdf={pdf_path}",
+            chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--no-pdf-header-footer", f"--print-to-pdf={pdf_path}",
             f"file://{html_path}",
         ]
-        proc = subprocess.run(
-            cmd, capture_output=True, timeout=timeout, cwd=workdir
-        )
-        if not os.path.exists(pdf_path):
-            raise RuntimeError(
-                f"Chrome did not produce a PDF (rc={proc.returncode}): "
-                f"{proc.stderr.decode('utf-8', 'ignore')[:500]}"
-            )
+        subprocess.run(cmd, timeout=timeout, capture_output=True, check=True)
         with open(pdf_path, "rb") as f:
-            data = f.read()
-        if not data:
-            raise RuntimeError("Chrome produced an empty PDF")
-        return data
+            return f.read()
     finally:
         try:
             shutil.rmtree(workdir, ignore_errors=True)
         except Exception:
             pass
+
+
+def html_to_pdf_bytes(html_str: str, timeout: int = 45) -> bytes:
+    """Convert an HTML string to PDF bytes.
+
+    Uses WeasyPrint (in-memory) first; only if that fails does it fall back to a
+    headless-Chrome render. Raises RuntimeError if both are unavailable.
+    """
+    try:
+        return _weasyprint_pdf(html_str)
+    except Exception as e:
+        logger.warning(f"WeasyPrint render failed ({e}); trying headless-Chrome fallback")
+        return _chromium_pdf(html_str, timeout=timeout)
