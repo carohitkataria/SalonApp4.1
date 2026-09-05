@@ -143,7 +143,7 @@ function sparkAreaPath(vals, { w = 240, h = 60, pad = 4 } = {}) {
   return parts.join(' ');
 }
 
-export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [], goToTab, getAuthHeaders, handleCallToken, handleCompleteToken }) {
+export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [], goToTab, getAuthHeaders, handleCallToken, handleCompleteToken, onSaved }) {
   const navigate = useNavigate();
   const auth = useAuth?.() || {};
   const { logout, hasModulePermission, salonUser } = auth;
@@ -975,7 +975,7 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
       <AppointmentDrawer
         open={apptOpen}
         onClose={() => setApptOpen(false)}
-        onSaved={() => { setApptOpen(false); fetchKpis(); toast.success('Appointment saved'); }}
+        onSaved={(info) => { setApptOpen(false); fetchKpis(); onSaved?.(info); toast.success('Appointment saved'); }}
         salonId={salonId}
         getAuthHeaders={getAuthHeaders}
         defaultMode="queue"

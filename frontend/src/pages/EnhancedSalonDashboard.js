@@ -526,18 +526,29 @@ export default function EnhancedSalonDashboard() {
     }
   };
 
+  // Pure upsert-by-id + re-sort in place. Keeps the list ordered by created_at
+  // DESC (newest first) — exactly mirroring the backend /queue order — so an
+  // inserted OR updated row lands in the right position without a full re-fetch.
+  // Covers regular bookings AND direct invoices (is_direct_invoice: true).
+  const upsertById = (list, rec) => {
+    if (!rec || !rec.id) return Array.isArray(list) ? list : [];
+    const arr = Array.isArray(list) ? list.slice() : [];
+    const idx = arr.findIndex((t) => t.id === rec.id);
+    if (idx === -1) arr.unshift(rec);
+    else arr[idx] = { ...arr[idx], ...rec };
+    arr.sort((a, b) => {
+      const ta = new Date(a.created_at || a.date || 0).getTime() || 0;
+      const tb = new Date(b.created_at || b.date || 0).getTime() || 0;
+      return tb - ta; // newest first
+    });
+    return arr;
+  };
+
   // Incremental upsert — merge one token into the list in place so existing rows
   // never blank out when a new booking/invoice is created (no full re-fetch).
   const upsertTokenLocal = (tok) => {
     if (!tok || !tok.id) return false;
-    setTokens((prev) => {
-      const arr = Array.isArray(prev) ? prev : [];
-      const idx = arr.findIndex((t) => t.id === tok.id);
-      if (idx === -1) return [tok, ...arr];
-      const next = arr.slice();
-      next[idx] = { ...next[idx], ...tok };
-      return next;
-    });
+    setTokens((prev) => upsertById(prev, tok));
     return true;
   };
 
@@ -1304,6 +1315,23 @@ export default function EnhancedSalonDashboard() {
         getAuthHeaders={getAuthHeaders}
         handleCallToken={handleCallToken}
         handleCompleteToken={handleCompleteToken}
+        onSaved={(info) => {
+          try {
+            fetchBarbers?.();
+            const rec = info && info.token;
+            if (rec && rec.id) {
+              // Incremental: upsert the single new/updated record + re-sort in
+              // place. Existing rows stay rendered — no blank flash. Covers
+              // direct invoices (is_direct_invoice: true) too.
+              setTokens((prev) => upsertById(prev, rec));
+              fetchDailySales?.(salonId);
+            } else {
+              // Fallback ONLY when the create response didn't carry the record.
+              fetchTokens?.(salonId);
+              fetchDailySales?.(salonId);
+            }
+          } catch (_) { /* ignore */ }
+        }}
       />
     ) : (
     <HomeV2Shell
