@@ -21626,6 +21626,16 @@ async def startup_event():
         logger.info(f"[STARTUP] Seeded {n} supplier product samples")
     except Exception as e:
         logger.error(f"[STARTUP] product samples seed failed: {e}")
+    # Sep 2026 — seed the permanent platform WhatsApp template library
+    # (booking/invoice/reminder + marketing pack). Idempotent upsert on every
+    # boot/deploy so production always carries the full library.
+    try:
+        from seed_template_library import seed_platform_template_library
+        _n = await seed_platform_template_library(db)
+        _total = await db.platform_template_library.count_documents({})
+        logger.info(f"[STARTUP] platform template library ensured (upserted/updated {_n}; total {_total})")
+    except Exception as e:
+        logger.error(f"[STARTUP] platform template library seed failed: {e}")
     # Feb 2026 — Removed the sample-Shop seed. The Shop tab now shows only
     # products that real suppliers create through their supplier portal.
     # We keep the supplier ACCOUNT rows above (product_samples_seed) so the
