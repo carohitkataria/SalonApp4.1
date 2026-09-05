@@ -458,7 +458,21 @@ export default function QueueTabV2({
                     )}
                   </div>
                   <div className="sub l-staff">{t.barber_name || 'Unassigned'}</div>
-                  <div><span className={`qv2-statuspill ${st}`}>{STATUS_LABEL[st] || st}</span></div>
+                  <div>
+                    <span className={`qv2-statuspill ${st}`}>{STATUS_LABEL[st] || st}</span>
+                    {(() => {
+                      const isDirect = t.is_direct_invoice || t.source === 'direct_invoice' || t.booking_type === 'direct';
+                      const isWalkin = !isDirect && (t.booking_type === 'queue' || t.source === 'walk_in' || t.source === 'walkin');
+                      const isScheduled = !isDirect && t.booking_type === 'future';
+                      const isOnline = !isDirect && !isWalkin && !isScheduled && t.source === 'online';
+                      const label = isDirect ? 'Direct invoice' : isWalkin ? 'Walk-in' : isScheduled ? 'Scheduled' : isOnline ? 'Online' : null;
+                      if (!label) return null;
+                      const color = isDirect ? '#6C4FE0' : isScheduled ? '#0E7490' : isWalkin ? '#B45309' : '#3730A3';
+                      return (
+                        <span data-testid={`queue-type-${t.id}`} style={{ display: 'block', marginTop: 4, fontSize: 10, fontWeight: 700, color, background: `${color}15`, borderRadius: 6, padding: '1px 6px', width: 'fit-content' }}>{label}</span>
+                      );
+                    })()}
+                  </div>
                   <div className="money" style={{ textAlign: 'center' }}>₹{Number(t.total_amount || 0).toLocaleString('en-IN')}</div>
                   <div className="qv2-lact" style={{ justifyContent: 'flex-end' }} onClick={e => e.stopPropagation()}>
                     {st === 'waiting' && <>

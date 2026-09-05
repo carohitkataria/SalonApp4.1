@@ -674,6 +674,10 @@ class TokenModel(BaseModel):
     # guests/unverified users; true once they verify via OTP. Used by the
     # history UI to surface a small badge.
     is_otp_verified_at_booking: Optional[bool] = False
+    # Bug fix (Sep 2026): expose the direct-invoice flag so the Bookings list can
+    # render a distinct "Direct invoice" type (model_config extra="ignore" was
+    # silently dropping it before).
+    is_direct_invoice: Optional[bool] = False
     created_at: str
 
 class AddServicesRequest(BaseModel):
@@ -16180,6 +16184,13 @@ async def get_customer_profile(
         "total": float(t.get("total_amount") or t.get("total") or 0),
         "status": t.get("status"),
         "invoice_id": t.get("invoice_id"),
+        # Bug fix (Sep 2026): surface direct-invoice type + payment so the guest
+        # drawer's Visits/Invoice section can label and link every record.
+        "is_direct_invoice": bool(t.get("is_direct_invoice")),
+        "source": t.get("source"),
+        "booking_type": t.get("booking_type"),
+        "payment_status": t.get("payment_status"),
+        "payment_mode": t.get("payment_mode"),
     } for t in tks[:20]]
 
     # WS1 — reschedule events for this customer (shown in the history timeline)
@@ -16595,6 +16606,11 @@ async def create_direct_invoice(
         "payment_confirmed": True,
         "payment_status": "paid",
         "is_direct_invoice": True,
+        # Bug fix (Sep 2026): tag direct invoices with an explicit source/type so
+        # the Bookings list can show them with a distinct "Direct invoice" type,
+        # and so downstream models don't fall back to generic defaults.
+        "source": "direct_invoice",
+        "booking_type": "direct",
         "notes": notes,
         "created_at": now_iso,
         "completed_at": now_iso,
@@ -16657,6 +16673,15 @@ async def create_direct_invoice(
         invoice_id = (refreshed or {}).get("invoice_id")
     except Exception as e:
         logger.warning(f"Direct-invoice PDF gen/send failed for token {token_id}: {e}")
+
+    # Bug fix (Sep 2026): broadcast the new direct-invoice token so the Bookings
+    # list upserts it live (incremental) — no full re-fetch / blank flash. Carry
+    # the invoice_id so the row's invoice link resolves immediately.
+    try:
+        token_doc["invoice_id"] = invoice_id
+        await broadcast_update("token_created", token_doc)
+    except Exception:
+        pass
 
     return {
         "success": True,

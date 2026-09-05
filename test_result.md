@@ -102,6 +102,181 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
+#=== SESSION 2026-09-05 (BUG FIX — Bookings list direct invoices + type; Guest drawer history) — TEST THESE FIRST ===
+# Fresh container. Salon f4879c04-b79e-4943-9b3d-c84228c543b3, admin/salon123.
+bugfix_2026_09_05:
+  backend:
+    - task: "Direct invoices identifiable in Bookings list (/queue exposes is_direct_invoice + source/booking_type)"
+      implemented: true
+      working: true
+      file: "backend/server.py (TokenModel ~674 is_direct_invoice; direct-invoice token_doc source/booking_type ~16593; broadcast token_created ~16660)"
+      stuck_count: 0
+      priority: "high"
+      needs_retesting: false
+      status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            Direct invoices are stored as completed tokens but TokenModel(extra='ignore') was DROPPING
+            is_direct_invoice from /queue responses, so the list couldn't mark them as a distinct type.
+            Added is_direct_invoice to TokenModel. Direct-invoice token_doc now sets source='direct_invoice'
+            and booking_type='direct'. Direct-invoice endpoint now broadcasts 'token_created' (full token +
+            invoice_id) so the list upserts it live (no full refetch/blank).
+            TEST: (1) POST /api/salons/{salon_id}/direct-invoice {customer_name, phone:"9812300077",
+            selected_services:[<svc id from /services/enabled>], barber_id:<from /barbers>, payment_mode:"cash"}
+            -> 200 with token_number + invoice_id. (2) GET /api/salons/{salon_id}/queue?date=<UTC today> -> 200
+            and the new token IS present with status='completed', is_direct_invoice=true, source='direct_invoice',
+            booking_type='direct', invoice_id set. (3) Regression: a normal walk-in booking (POST /salon-booking
+            booking_type='queue') still appears with is_direct_invoice=false (or absent->false).
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ BUG FIX 1 FULLY TESTED AND WORKING (3/3 tests passed): Comprehensive testing completed successfully for salon f4879c04-b79e-4943-9b3d-c84228c543b3. AUTHENTICATION: Admin login working perfectly with identifier='admin', password='salon123'. Retrieved 6 enabled services and 2 barbers (Imran, Abdul) for testing.
+            
+            TEST RESULTS:
+            1) CREATE DIRECT INVOICE - ✅ PASS
+               - POST /api/salons/{salon_id}/direct-invoice returned HTTP 200
+               - Request: {customer_name:"DI Test", phone:"9812300077", selected_services:[service_id], barber_id, payment_mode:"cash"}
+               - Response: {success:true, token_id, token_number:"M7", invoice_id:"f6cb3f20-3a6f-4c0b-bbdc-054688588e17"}
+               - All required fields present in response
+            
+            2) DIRECT INVOICE IN QUEUE - ✅ PASS (CORE BUG FIX VERIFIED)
+               - GET /api/salons/{salon_id}/queue?date=2026-09-05 returned HTTP 200
+               - Found 8 tokens in queue, direct invoice token M7 PRESENT
+               - CRITICAL ASSERTIONS ALL PASSED:
+                 * status == 'completed' ✓
+                 * is_direct_invoice == true ✓ (THIS WAS THE BUG - field was being stripped before)
+                 * source == 'direct_invoice' ✓
+                 * booking_type == 'direct' ✓
+                 * invoice_id is set (non-null) ✓
+               - The is_direct_invoice field is now correctly exposed in /queue responses
+               - TokenModel no longer strips this field (extra='ignore' was the issue)
+            
+            3) WALK-IN BOOKING REGRESSION - ✅ PASS
+               - POST /api/salons/{salon_id}/salon-booking with booking_type='queue' returned HTTP 200
+               - Token M8 created successfully
+               - GET /queue returned HTTP 200 (no validation 500)
+               - Walk-in token found in queue with is_direct_invoice=false
+               - Normal bookings still work correctly and don't break /queue endpoint
+            
+            CRITICAL REQUIREMENTS MET:
+            ✅ Direct invoice created successfully with token_number and invoice_id
+            ✅ Direct invoice appears in /queue with is_direct_invoice=true (CORE FIX)
+            ✅ Direct invoice has source='direct_invoice' and booking_type='direct'
+            ✅ Direct invoice has invoice_id set (non-null)
+            ✅ Walk-in bookings still work (regression OK)
+            ✅ /queue endpoint returns 200 for both direct invoices and normal bookings
+            
+            The direct invoice identifiable in Bookings list fix is production-ready and fully functional. The is_direct_invoice field is now correctly exposed in API responses, allowing the frontend to distinguish direct invoices from regular bookings.
+    - task: "Guest profile history includes direct invoices + type/invoice link"
+      implemented: true
+      working: true
+      file: "backend/server.py (GET /salons/{id}/customers/profile ~16175 history_tokens)"
+      stuck_count: 0
+      priority: "high"
+      needs_retesting: false
+      status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            The profile endpoint queries tokens by phone ($in normalized variants) and already includes
+            direct invoices. Added is_direct_invoice, source, booking_type, payment_status, payment_mode to
+            each history_tokens item so the guest drawer's Visits section can label type + link the invoice.
+            TEST: after creating a direct invoice for phone "9812300077", GET
+            /api/salons/{salon_id}/customers/profile?phone=9812300077 -> 200 with total_visits>=1 and
+            history_tokens containing an item with is_direct_invoice=true, invoice_id set, status='completed',
+            total>0. Also confirm history is NOT empty for a phone that has any tokens. No auth -> 401/403.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ BUG FIX 2 FULLY TESTED AND WORKING (2/2 tests passed): Comprehensive testing completed successfully for salon f4879c04-b79e-4943-9b3d-c84228c543b3. AUTHENTICATION: Admin login working perfectly.
+            
+            TEST RESULTS:
+            4) GUEST PROFILE HISTORY - ✅ PASS (CORE BUG FIX VERIFIED)
+               - GET /api/salons/{salon_id}/customers/profile?phone=9812300077 returned HTTP 200
+               - Profile data:
+                 * phone: +919812300077
+                 * name: "DI Test"
+                 * source: "direct_invoice"
+                 * total_visits: 2
+                 * total_spend: ₹1000.0
+                 * history_tokens: 2 items (NON-EMPTY)
+               - CRITICAL ASSERTIONS ALL PASSED:
+                 * total_visits >= 1 ✓ (value: 2)
+                 * history_tokens is non-empty ✓ (2 items)
+                 * Direct invoice found in history_tokens ✓
+                 * is_direct_invoice == true ✓ (THIS WAS THE BUG - field was missing before)
+                 * status == 'completed' ✓
+                 * total > 0 ✓ (value: ₹500.0)
+                 * invoice_id is set ✓ (value: "f6cb3f20-3a6f-4c0b-bbdc-054688588e17")
+                 * source == 'direct_invoice' ✓
+               - Additional fields correctly included:
+                 * booking_type: "direct"
+                 * payment_status: "paid"
+                 * payment_mode: "cash"
+               - Guest drawer can now properly label and link direct invoices
+            
+            5) PROFILE NO AUTH - ✅ PASS
+               - GET /api/salons/{salon_id}/customers/profile?phone=9812300077 with NO Authorization header
+               - Correctly rejected with HTTP 403
+               - Auth guard working correctly
+            
+            CRITICAL REQUIREMENTS MET:
+            ✅ Profile endpoint returns total_visits >= 1 for customer with direct invoice
+            ✅ history_tokens is non-empty (contains direct invoice records)
+            ✅ Direct invoice item has is_direct_invoice=true (CORE FIX)
+            ✅ Direct invoice item has status='completed'
+            ✅ Direct invoice item has total > 0
+            ✅ Direct invoice item has invoice_id set (non-null)
+            ✅ Direct invoice item has source='direct_invoice'
+            ✅ Direct invoice item has booking_type='direct'
+            ✅ Direct invoice item has payment_status and payment_mode
+            ✅ Profile endpoint requires authentication (403 without token)
+            
+            The guest profile history fix is production-ready and fully functional. Direct invoices are now correctly included in the customer's history with all required fields (is_direct_invoice, source, booking_type, invoice_id, payment details), allowing the guest drawer to properly display and link them.
+  metadata:
+    created_by: "main_agent"
+    version: "1.0"
+    test_sequence: 0
+    run_ui: false
+  test_plan:
+    current_focus:
+      - "Direct invoices identifiable in Bookings list (/queue exposes is_direct_invoice + source/booking_type)"
+      - "Guest profile history includes direct invoices + type/invoice link"
+    stuck_tasks: []
+    test_all: false
+    test_priority: "high_first"
+  agent_communication:
+    - agent: "main"
+      message: |
+        Test ONLY bugfix_2026_09_05 backend tasks. Salon f4879c04-b79e-4943-9b3d-c84228c543b3, admin/salon123.
+        Get a service id from GET /api/salons/{id}/services/enabled and a barber from GET /api/salons/{id}/barbers.
+        Focus: (1) a direct invoice appears in /queue for today with is_direct_invoice=true + source='direct_invoice'
+        + booking_type='direct' + invoice_id; (2) the same customer's /customers/profile history_tokens includes
+        that direct invoice with is_direct_invoice=true + invoice_id (history not empty). Light regression: a normal
+        salon-booking still lists fine and /queue stays 200. WhatsApp/Meta are mock — ignore send delivery.
+    - agent: "testing"
+      message: |
+        ✅ BACKEND TESTING COMPLETE - ALL TESTS PASSED (8/8 tests): Comprehensive backend testing completed successfully for bugfix_2026_09_05 session. Environment: Salon f4879c04-b79e-4943-9b3d-c84228c543b3, admin login (admin/salon123). WhatsApp/Meta are in MOCK mode as expected. Both bug fixes (BUG FIX 1 & BUG FIX 2) are WORKING and production-ready. Test suite: /app/backend_test.py with 8 comprehensive test cases covering all specified scenarios. NO CRITICAL ISSUES FOUND. All endpoints respond correctly with proper status codes, data structures, and the critical is_direct_invoice field is now correctly exposed.
+        
+        SUMMARY OF FIXES VERIFIED:
+        ✅ BUG FIX 1 - Direct invoices identifiable in Bookings list (3/3 tests passed)
+           - Direct invoice created successfully with token_number and invoice_id
+           - Direct invoice appears in /queue with is_direct_invoice=true (CORE FIX - field was being stripped before)
+           - Direct invoice has source='direct_invoice' and booking_type='direct'
+           - Direct invoice has invoice_id set (non-null)
+           - Walk-in bookings still work (regression OK)
+           - /queue endpoint returns 200 for both direct invoices and normal bookings
+        
+        ✅ BUG FIX 2 - Guest profile history includes direct invoices (2/2 tests passed)
+           - Profile endpoint returns total_visits >= 1 for customer with direct invoice
+           - history_tokens is non-empty (contains direct invoice records)
+           - Direct invoice item has is_direct_invoice=true (CORE FIX - field was missing before)
+           - Direct invoice item has all required fields: status, total, invoice_id, source, booking_type, payment details
+           - Profile endpoint requires authentication (403 without token)
+        
+        Both fixes are production-ready and fully functional. No issues requiring main agent attention.
+
 #=== SESSION 2026-09-02 (PROD FIXES 1 & 2 — invoice PDF cache + bookings source/booking_type) — TEST THESE FIRST ===
 # Env: FRESH container restored. .env recreated. Salon: f4879c04-b79e-4943-9b3d-c84228c543b3
 # Admin login: POST /api/salon/users/login {identifier:"admin", password:"salon123"}

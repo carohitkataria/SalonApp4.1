@@ -304,12 +304,28 @@ export default function EnhancedSalonDashboard() {
     fetchNotificationCount(storedSalonId);
     fetchDailySales(storedSalonId);
 
-    // WebSocket subscriptions
-    const handleUpdate = () => {
-      if (storedSalonId) {
-        fetchTokens(storedSalonId);
+    // WebSocket subscriptions — incremental, no full-list refetch (no blank flash)
+    const handleUpdate = (payload) => {
+      if (!storedSalonId) return;
+      // 1) Event carries the full token → upsert it in place.
+      if (payload && typeof payload === 'object' && payload.id && payload.token_number) {
+        upsertTokenLocal(payload);
         fetchDailySales(storedSalonId);
+        return;
       }
+      // 2) Status-only event (e.g. token_completed {token_id}) → patch that row.
+      if (payload && typeof payload === 'object' && payload.token_id) {
+        setTokens((prev) => Array.isArray(prev)
+          ? prev.map((t) => (t.id === payload.token_id ? { ...t, status: 'completed' } : t))
+          : prev);
+        fetchDailySales(storedSalonId);
+        // Light background refresh (non-blanking) to pick up invoice_id etc.
+        fetchTokens(storedSalonId);
+        return;
+      }
+      // 3) Unknown payload shape → safe refetch (non-blanking).
+      fetchTokens(storedSalonId);
+      fetchDailySales(storedSalonId);
     };
 
     subscribe('token_created', handleUpdate);
@@ -477,8 +493,9 @@ export default function EnhancedSalonDashboard() {
     }
   };
 
-  const fetchTokens = async (id) => {
+  const fetchTokens = async (id = salonId) => {
     try {
+      if (!id) return;
       let url;
       // Feb 2026 — Range date support. When user selects "Range" and picks a
       // date_from/date_to, send both to backend so /queue can return tokens
@@ -501,10 +518,27 @@ export default function EnhancedSalonDashboard() {
       }
 
       const response = await axios.get(url);
-      setTokens(response.data);
+      // Non-blanking: only replace when we actually got an array, so a transient
+      // error never wipes the on-screen list.
+      if (Array.isArray(response.data)) setTokens(response.data);
     } catch (error) {
       console.error('Error fetching tokens:', error);
     }
+  };
+
+  // Incremental upsert — merge one token into the list in place so existing rows
+  // never blank out when a new booking/invoice is created (no full re-fetch).
+  const upsertTokenLocal = (tok) => {
+    if (!tok || !tok.id) return false;
+    setTokens((prev) => {
+      const arr = Array.isArray(prev) ? prev : [];
+      const idx = arr.findIndex((t) => t.id === tok.id);
+      if (idx === -1) return [tok, ...arr];
+      const next = arr.slice();
+      next[idx] = { ...next[idx], ...tok };
+      return next;
+    });
+    return true;
   };
 
   const handleCallNext = async (barberId) => {
@@ -1279,7 +1313,7 @@ export default function EnhancedSalonDashboard() {
       activeTab={activeTab}
       unreadNotifCount={unreadNotifCount}
       onLogout={handleLogout}
-      onSaved={() => { try { fetchTokens?.(); fetchBarbers?.(); } catch (_) {} }}
+      onSaved={() => { try { fetchBarbers?.(); setTimeout(() => fetchTokens?.(), 1500); } catch (_) { /* ignore */ } }}
     >
     <div className="min-h-screen bg-background text-foreground">
       <div className="w-full px-3 md:px-5 py-4">

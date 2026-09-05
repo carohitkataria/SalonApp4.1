@@ -366,7 +366,11 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
                             <div style={struck ? { textDecoration: 'line-through' } : {}}>{fmtDate(t.date, { day: '2-digit', month: 'short' })}</div>
                             <div>{t.barber_name || '—'}</div>
                             <div>{t.services_count}</div>
-                            <div><span style={{ fontSize: 11, fontWeight: 800, borderRadius: 6, padding: '2px 8px', background: cc.bg, color: cc.fg }}>{b === 'noshow' ? 'No-show ⚑' : (t.status || '—')}</span></div>
+                            <div><span style={{ fontSize: 11, fontWeight: 800, borderRadius: 6, padding: '2px 8px', background: cc.bg, color: cc.fg }}>{b === 'noshow' ? 'No-show ⚑' : (t.status || '—')}</span>
+                              {(t.is_direct_invoice || t.source === 'direct_invoice' || t.booking_type === 'direct') && (
+                                <span style={{ display: 'block', marginTop: 3, fontSize: 10, fontWeight: 700, color: '#6C4FE0', background: '#6C4FE015', borderRadius: 6, padding: '1px 6px', width: 'fit-content' }}>Direct</span>
+                              )}
+                            </div>
                             <div className="money" style={struck ? { textDecoration: 'line-through' } : {}}>{fmtRupee(t.total)}</div>
                             <div>
                               {t.invoice_id ? (
