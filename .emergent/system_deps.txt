@@ -1,7 +1,7 @@
 cron=3.0pl1-162
-libpango-1.0-0
-libpangocairo-1.0-0
-libcairo2
-libgdk-pixbuf-2.0-0
-libffi-dev
-shared-mime-info
+libpango-1.0-0=1.50.12+ds-1
+libpangocairo-1.0-0=1.50.12+ds-1
+libcairo2=1.16.0-7
+libgdk-pixbuf-2.0-0=2.42.10+dfsg-1+deb12u4
+libffi-dev=3.4.4-1
+shared-mime-info=2.2-1

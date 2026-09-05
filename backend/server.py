@@ -3764,6 +3764,7 @@ async def seed_invoice_event_templates():
     logger.info(f"[STARTUP] invoice event templates ensured for {len(salon_ids)} salon(s)")
 
 
+async def send_meta_invoice_template(token_data: dict, salon: dict, invoice_id: str,
                                      invoice_no: str, amount) -> dict:
     """Send the invoice-delivery WhatsApp message via the Meta Cloud API template.
 
