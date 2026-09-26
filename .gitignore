@@ -402,3 +402,4 @@ check_sold_memberships.py
 .env
 .env.*
 *.env
+!.env.example

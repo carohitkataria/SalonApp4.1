@@ -8802,51 +8802,63 @@ async def auth_customer_login_password(body: CustomerLoginPasswordIn):
 
 
 # ============================================================================
-# GOOGLE LOGIN — Emergent-managed Google OAuth (Item 9).
+# GOOGLE LOGIN — Google Identity (OAuth 2.0 / OpenID Connect).
 # ----------------------------------------------------------------------------
-# The frontend redirects to `https://auth.emergentagent.com/?redirect=<callback>`
-# After Google sign-in, the user lands at <callback>#session_id=<id>. The
-# frontend POSTs the session_id (plus an `audience`) to this endpoint. We
-# exchange it with Emergent's identity service to get the user's email/name,
-# find-or-create the corresponding user record in the per-audience collection,
-# and return the audience's existing JWT so the rest of the app keeps working
-# without any cookie / session changes.
+# The frontend redirects to Google's OAuth endpoint with
+# `response_type=id_token`. Google sends the user back to
+# `<origin>/auth/callback#id_token=<jwt>&state=<...>`. The frontend POSTs the
+# id_token (plus an `audience` and the `nonce` it generated) to this endpoint.
+# We verify the token's signature, audience (our client ID), issuer, expiry and
+# nonce with google-auth, find-or-create the corresponding user record in the
+# per-audience collection, and return the audience's existing JWT so the rest
+# of the app keeps working without any cookie / session changes.
 # ============================================================================
 
-EMERGENT_AUTH_BASE = os.environ.get(
-    "EMERGENT_AUTH_BASE",
-    "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-)
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 
 
-async def _exchange_emergent_session(session_id: str) -> dict:
-    """Call Emergent's auth backend to exchange a session_id for user data."""
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
+def _verify_google_id_token_sync(token: str) -> dict:
+    from google.oauth2 import id_token as google_id_token
+    from google.auth.transport import requests as google_requests
+
+    return google_id_token.verify_oauth2_token(
+        token, google_requests.Request(), GOOGLE_CLIENT_ID
+    )
+
+
+async def _verify_google_id_token(token: str, nonce: Optional[str]) -> dict:
+    """Verify a Google ID token and return {email, name, picture, id}."""
+    if not token:
+        raise HTTPException(status_code=400, detail="id_token is required")
+    if not GOOGLE_CLIENT_ID:
+        logger.error("[google] GOOGLE_CLIENT_ID is not configured")
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured")
     try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            res = await http.get(
-                EMERGENT_AUTH_BASE,
-                headers={"X-Session-ID": session_id},
-            )
-        if res.status_code != 200:
-            logger.warning(
-                f"[google] Emergent session exchange failed status={res.status_code} body={res.text[:200]}"
-            )
-            raise HTTPException(status_code=401, detail="Google sign-in could not be completed. Please try again.")
-        data = res.json()
-        if not data.get("email"):
-            raise HTTPException(status_code=401, detail="Google sign-in returned no email")
-        return data
-    except HTTPException:
-        raise
+        claims = await asyncio.to_thread(_verify_google_id_token_sync, token)
+    except ValueError as e:
+        logger.warning(f"[google] id_token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Google sign-in could not be completed. Please try again.")
     except Exception as e:
-        logger.error(f"[google] Emergent exchange error: {e}")
+        logger.error(f"[google] id_token verification error: {e}")
         raise HTTPException(status_code=502, detail="Google sign-in service is temporarily unavailable")
+
+    if not nonce or claims.get("nonce") != nonce:
+        raise HTTPException(status_code=401, detail="Google sign-in could not be completed. Please try again.")
+    if not claims.get("email"):
+        raise HTTPException(status_code=401, detail="Google sign-in returned no email")
+    if not claims.get("email_verified"):
+        raise HTTPException(status_code=401, detail="Your Google email address is not verified")
+    return {
+        "email": claims.get("email"),
+        "name": claims.get("name"),
+        "picture": claims.get("picture"),
+        "id": claims.get("sub"),
+    }
 
 
 class GoogleAuthIn(BaseModel):
-    session_id: str
+    id_token: str
+    nonce: str
     audience: str  # one of: customer | salon | platform | supplier
 
 
@@ -8861,7 +8873,7 @@ async def auth_google(payload: GoogleAuthIn):
     if audience not in ("customer", "salon", "platform", "supplier"):
         raise HTTPException(status_code=400, detail="audience must be customer | salon | platform | supplier")
 
-    data = await _exchange_emergent_session(payload.session_id)
+    data = await _verify_google_id_token(payload.id_token, payload.nonce)
     email = (data.get("email") or "").strip().lower()
     name = (data.get("name") or "").strip() or email.split("@")[0]
     picture = data.get("picture")
@@ -9928,7 +9940,7 @@ async def parse_salon_menu(
     file: UploadFile = File(...),
     current_user=Depends(get_current_salon_user),
 ):
-    """Parse a salon menu (PDF/PNG/JPG) using GPT-5 vision and return a list of
+    """Parse a salon menu (PDF/PNG/JPG) using Gemini and return a list of
     services and packages extracted from the menu. The salon can then choose to
     'add' (merge with existing) or 'replace' the predefined services.
     """
@@ -9944,13 +9956,11 @@ async def parse_salon_menu(
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large (max 10 MB)")
 
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY not configured")
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
 
-    # Gemini supports both PDFs and images natively via FileContentWithMimeType,
-    # and has a more generous budget on the Emergent Universal LLM Key than GPT-5.
-    import tempfile
+    # Gemini accepts both PDFs and images natively as inline bytes.
     suffix = os.path.splitext(fname)[1]
     mime_map = {
         ".pdf": "application/pdf",
@@ -9961,134 +9971,118 @@ async def parse_salon_menu(
     }
     mime = mime_map.get(suffix, "application/octet-stream")
 
-    tmp_path = None
+    from google import genai
+    from google.genai import types as genai_types
+
+    system_message = (
+        "You are an expert salon-services extraction assistant. The user will upload a "
+        "salon menu (PDF, photo, or image). Extract every service and package on the menu. "
+        "Return ONLY a valid JSON object with the following shape and NOTHING ELSE — no "
+        "prose, no markdown fences, no explanations:\n"
+        "{\n"
+        '  "services": [\n'
+        "    {\n"
+        '      "service_name": "string",\n'
+        '      "description": "string (optional, may be empty)",\n'
+        '      "category": "string — best-fit category like Hair, Facial, Spa, Bleach, '
+        'Pedicure, Manicure, Wax, Threading, Massage, etc.",\n'
+        '      "gender": "Men | Women | Unisex",\n'
+        '      "default_duration": 30,\n'
+        '      "base_price": 0\n'
+        "    }\n"
+        "  ],\n"
+        '  "packages": [\n'
+        "    {\n"
+        '      "package_name": "string",\n'
+        '      "service_names": ["service 1", "service 2"],\n'
+        '      "description": "string (optional)",\n'
+        '      "gender": "Men | Women | Unisex",\n'
+        '      "package_price": 0\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "Rules:\n"
+        "1. Strip currency symbols (Rs, INR, ₹) — return integer prices only.\n"
+        "2. If gender is unclear, default to 'Unisex'.\n"
+        "3. If duration is missing, estimate by service type (haircut=30, facial=60, "
+        "spa=75, threading=15, massage=60).\n"
+        "4. Skip non-service items (taxes, addresses, phone numbers, contact info).\n"
+        "5. Ensure JSON is parseable — no trailing commas, no comments, no markdown."
+    )
+
+    client = genai.Client(api_key=api_key)
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-
-        from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContentWithMimeType
-
-        system_message = (
-            "You are an expert salon-services extraction assistant. The user will upload a "
-            "salon menu (PDF, photo, or image). Extract every service and package on the menu. "
-            "Return ONLY a valid JSON object with the following shape and NOTHING ELSE — no "
-            "prose, no markdown fences, no explanations:\n"
-            "{\n"
-            '  "services": [\n'
-            "    {\n"
-            '      "service_name": "string",\n'
-            '      "description": "string (optional, may be empty)",\n'
-            '      "category": "string — best-fit category like Hair, Facial, Spa, Bleach, '
-            'Pedicure, Manicure, Wax, Threading, Massage, etc.",\n'
-            '      "gender": "Men | Women | Unisex",\n'
-            '      "default_duration": 30,\n'
-            '      "base_price": 0\n'
-            "    }\n"
-            "  ],\n"
-            '  "packages": [\n'
-            "    {\n"
-            '      "package_name": "string",\n'
-            '      "service_names": ["service 1", "service 2"],\n'
-            '      "description": "string (optional)",\n'
-            '      "gender": "Men | Women | Unisex",\n'
-            '      "package_price": 0\n'
-            "    }\n"
-            "  ]\n"
-            "}\n"
-            "Rules:\n"
-            "1. Strip currency symbols (Rs, INR, ₹) — return integer prices only.\n"
-            "2. If gender is unclear, default to 'Unisex'.\n"
-            "3. If duration is missing, estimate by service type (haircut=30, facial=60, "
-            "spa=75, threading=15, massage=60).\n"
-            "4. Skip non-service items (taxes, addresses, phone numbers, contact info).\n"
-            "5. Ensure JSON is parseable — no trailing commas, no comments, no markdown."
-        )
-
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"menu-parse-{salon_id}-{uuid.uuid4()}",
-            system_message=system_message,
-        ).with_model("gemini", "gemini-2.5-pro")
-
-        file_content = FileContentWithMimeType(
-            file_path=tmp_path,
-            mime_type=mime,
-        )
-        msg = UserMessage(
-            text=(
+        resp = await client.aio.models.generate_content(
+            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            contents=[
+                genai_types.Part.from_bytes(data=content, mime_type=mime),
                 "Extract every salon service and package from this menu and return strict JSON "
                 "in the exact schema described in the system prompt. Do not include any markdown "
-                "or prose outside the JSON object."
+                "or prose outside the JSON object.",
+            ],
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_message,
+                response_mime_type="application/json",
             ),
-            file_contents=[file_content],
         )
+        raw = resp.text
+    except Exception as e:
+        logger.exception("Menu parse LLM error: %s", e)
+        raise HTTPException(status_code=502, detail=f"AI parsing failed: {e}")
 
+    # Best-effort JSON extraction (model may include code fences)
+    raw_text = (raw or "").strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.lower().startswith("json"):
+            raw_text = raw_text[4:].strip()
+    first = raw_text.find("{")
+    last = raw_text.rfind("}")
+    if first == -1 or last == -1:
+        raise HTTPException(status_code=502, detail="AI response was not valid JSON")
+    json_str = raw_text[first:last + 1]
+    try:
+        data = json.loads(json_str)
+    except Exception:
+        import re as _re
+        cleaned = _re.sub(r",\s*([}\]])", r"\1", json_str)
         try:
-            raw = await chat.send_message(msg)
+            data = json.loads(cleaned)
         except Exception as e:
-            logger.exception("Menu parse LLM error: %s", e)
-            raise HTTPException(status_code=502, detail=f"AI parsing failed: {e}")
+            raise HTTPException(status_code=502, detail=f"AI returned invalid JSON: {e}")
 
-        # Best-effort JSON extraction (model may include code fences)
-        raw_text = (raw or "").strip()
-        if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`")
-            if raw_text.lower().startswith("json"):
-                raw_text = raw_text[4:].strip()
-        first = raw_text.find("{")
-        last = raw_text.rfind("}")
-        if first == -1 or last == -1:
-            raise HTTPException(status_code=502, detail="AI response was not valid JSON")
-        json_str = raw_text[first:last + 1]
-        try:
-            data = json.loads(json_str)
-        except Exception:
-            import re as _re
-            cleaned = _re.sub(r",\s*([}\]])", r"\1", json_str)
-            try:
-                data = json.loads(cleaned)
-            except Exception as e:
-                raise HTTPException(status_code=502, detail=f"AI returned invalid JSON: {e}")
+    services_out = []
+    for s in (data.get("services") or []):
+        if not s.get("service_name"):
+            continue
+        services_out.append({
+            "service_name": str(s.get("service_name")).strip()[:120],
+            "description": str(s.get("description") or "").strip()[:500],
+            "category": str(s.get("category") or "General").strip()[:60] or "General",
+            "gender": (s.get("gender") if s.get("gender") in ("Men", "Women", "Unisex") else "Unisex"),
+            "default_duration": int(s.get("default_duration") or 30) or 30,
+            "base_price": int(round(float(s.get("base_price") or 0))),
+        })
 
-        services_out = []
-        for s in (data.get("services") or []):
-            if not s.get("service_name"):
-                continue
-            services_out.append({
-                "service_name": str(s.get("service_name")).strip()[:120],
-                "description": str(s.get("description") or "").strip()[:500],
-                "category": str(s.get("category") or "General").strip()[:60] or "General",
-                "gender": (s.get("gender") if s.get("gender") in ("Men", "Women", "Unisex") else "Unisex"),
-                "default_duration": int(s.get("default_duration") or 30) or 30,
-                "base_price": int(round(float(s.get("base_price") or 0))),
-            })
+    packages_out = []
+    for p in (data.get("packages") or []):
+        if not p.get("package_name"):
+            continue
+        packages_out.append({
+            "package_name": str(p.get("package_name")).strip()[:120],
+            "service_names": [str(x).strip()[:120] for x in (p.get("service_names") or []) if x],
+            "description": str(p.get("description") or "").strip()[:500],
+            "gender": (p.get("gender") if p.get("gender") in ("Men", "Women", "Unisex") else "Unisex"),
+            "package_price": int(round(float(p.get("package_price") or 0))),
+        })
 
-        packages_out = []
-        for p in (data.get("packages") or []):
-            if not p.get("package_name"):
-                continue
-            packages_out.append({
-                "package_name": str(p.get("package_name")).strip()[:120],
-                "service_names": [str(x).strip()[:120] for x in (p.get("service_names") or []) if x],
-                "description": str(p.get("description") or "").strip()[:500],
-                "gender": (p.get("gender") if p.get("gender") in ("Men", "Women", "Unisex") else "Unisex"),
-                "package_price": int(round(float(p.get("package_price") or 0))),
-            })
-
-        return {
-            "services": services_out,
-            "packages": packages_out,
-            "service_count": len(services_out),
-            "package_count": len(packages_out),
-            "message": f"Parsed {len(services_out)} services and {len(packages_out)} packages from the menu.",
-        }
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+    return {
+        "services": services_out,
+        "packages": packages_out,
+        "service_count": len(services_out),
+        "package_count": len(packages_out),
+        "message": f"Parsed {len(services_out)} services and {len(packages_out)} packages from the menu.",
+    }
 
 
 @api_router.post("/salons/{salon_id}/services/apply-parsed")
