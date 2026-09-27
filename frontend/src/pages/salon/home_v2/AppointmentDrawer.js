@@ -341,14 +341,19 @@ export default function AppointmentDrawer({
     if (l) return `${lName}`;
     return 'flat';
   };
+  /* A tier / length variant with no price (blank or 0 in the price matrix) is
+     not offered: it resolves to 0 and can't be picked. It never falls back to
+     the service's base price (that is just the lowest variant price). */
   const priceOfVariant = (s, tIdx = activeTier, lIdx = activeLen) => {
     const axes = s.axes || [];
-    if (axes.length && s.price_matrix) {
-      const v = s.price_matrix[variantKey(axes, tIdx, lIdx)];
-      if (v != null && v !== '') return Number(v);
+    if (axes.length) {
+      const v = Number((s.price_matrix || {})[variantKey(axes, tIdx, lIdx)]);
+      return Number.isFinite(v) && v > 0 ? v : 0;
     }
     return Number(s.base_price || s.price || 0);
   };
+  const variantOffered = (s, tIdx = activeTier, lIdx = activeLen) =>
+    !(s.axes || []).length || priceOfVariant(s, tIdx, lIdx) > 0;
   const variantLabel = (s) => {
     const axes = s.axes || [];
     const parts = [];
@@ -459,6 +464,7 @@ export default function AppointmentDrawer({
       }
       // Snapshot the active tier/length variant + price at add time.
       const svc = services.find((x) => x.id === id);
+      if (svc && !variantOffered(svc)) return prev;  // this tier / length has no price
       if (svc) {
         const axes = svc.axes || [];
         setSvcVariant((v) => ({
@@ -838,7 +844,6 @@ export default function AppointmentDrawer({
           .newapt .apt-fav-chip .apt-fav-star{font-size:18px;line-height:1;color:#C9992B}
           .newapt .apt-fav-chip.on{background:#C9992B !important;border-color:#C9992B !important}
           .newapt .apt-fav-chip.on .apt-fav-star{color:#fff}
-          .newapt .apt-catbody.has-rail{display:grid;grid-template-columns:auto 1fr;gap:9px;align-items:start}
           .newapt .apt-catbody .catalog{min-width:0}
           .newapt .apt-vrail{display:flex;flex-direction:column;gap:5px;padding:6px 5px;border:1.5px solid #ECECF3;border-radius:11px;background:#FBFBFE;align-self:start;position:sticky;top:0}
           .newapt .apt-vrail .vr-grp{display:flex;flex-direction:column;gap:4px}
@@ -929,7 +934,7 @@ export default function AppointmentDrawer({
             {/* Guest search relocated to the right "Guest details" card (redesign 2026). */}
 
             {/* Services & membership — title + search in one row (Feb 2026) */}
-            <div className="block">
+            <div className="block apt-svcblock">
               <div className="fs-title" style={{ margin: '2px 0 10px' }}>
                 <span className="dot" style={{ ['--sc']: '#6C4FE0' }} />
                 <span>Services &amp; membership <span className="req">*</span></span>
@@ -1013,7 +1018,7 @@ export default function AppointmentDrawer({
                         <div className="cat-lbl">Services</div>
                         <div className="svc-sub">
                           {filteredCatalog.services.map((s) => (
-                            <ServiceCard key={s.id} s={s} on={selectedSvc.includes(s.id)} onClick={() => toggleSvc(s.id)} price={priceOfVariant(s)} variant={variantLabel(s)} />
+                            <ServiceCard key={s.id} s={s} on={selectedSvc.includes(s.id)} onClick={() => toggleSvc(s.id)} price={priceOfVariant(s)} variant={variantLabel(s)} unavailable={!variantOffered(s)} />
                           ))}
                         </div>
                       </>
@@ -1057,7 +1062,7 @@ export default function AppointmentDrawer({
                   filteredCatalog.services.length ? (
                     <div className="svc-sub">
                       {filteredCatalog.services.map((s) => (
-                        <ServiceCard key={s.id} s={s} on={selectedSvc.includes(s.id)} onClick={() => toggleSvc(s.id)} price={priceOfVariant(s)} variant={variantLabel(s)} />
+                        <ServiceCard key={s.id} s={s} on={selectedSvc.includes(s.id)} onClick={() => toggleSvc(s.id)} price={priceOfVariant(s)} variant={variantLabel(s)} unavailable={!variantOffered(s)} />
                       ))}
                     </div>
                   ) : <div className="cat-empty">No services here.</div>
@@ -1525,13 +1530,18 @@ export default function AppointmentDrawer({
 }
 
 /* --------- small presentational components --------- */
-function ServiceCard({ s, on, onClick, price, variant }) {
+function ServiceCard({ s, on, onClick, price, variant, unavailable }) {
   const col = catOf(s.sub_category || s.category || 'General');
   const thumb = s.thumbnail_url || s.image_url;
   const shown = price != null ? price : (s.base_price || s.price);
   const onwards = s.price_type === 'onwards';
+  // Not offered in the chosen tier / length: greyed out at ₹0 and not pickable.
+  // An already-picked card stays clickable so it can still be removed.
+  const blocked = unavailable && !on;
   return (
-    <button className={`svc-card ${on ? 'on' : ''}`} onClick={onClick}
+    <button className={`svc-card ${on ? 'on' : ''} ${unavailable ? 'na' : ''}`} onClick={onClick}
+            disabled={blocked} aria-disabled={blocked}
+            title={unavailable ? `Not offered${variant ? ` for ${variant}` : ''} — no price set` : undefined}
             style={{ ['--cc']: col.cc, ['--ccbg']: col.bg }}>
       <span className="svc-check">
         <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
@@ -1544,7 +1554,9 @@ function ServiceCard({ s, on, onClick, price, variant }) {
         <span className="pr" style={{ color: col.cc }}>
           {money(shown)}{onwards ? '+' : ''} <span className="dur">· {s.default_duration || 30}m</span>
         </span>
-        {variant ? <span className="svc-tag">{variant}</span> : ((s.sub_category || s.category) && <span className="svc-tag">{s.sub_category || s.category}</span>)}
+        {unavailable
+          ? <span className="svc-tag">Not offered{variant ? ` · ${variant}` : ''}</span>
+          : variant ? <span className="svc-tag">{variant}</span> : ((s.sub_category || s.category) && <span className="svc-tag">{s.sub_category || s.category}</span>)}
       </span>
     </button>
   );
