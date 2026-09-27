@@ -3,17 +3,19 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
+import {
+  GOOGLE_OAUTH_NONCE_KEY,
+  GOOGLE_OAUTH_STATE_KEY,
+} from '@/components/GoogleLoginButton';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
 /**
- * AuthCallback — handles the Emergent OAuth redirect for ALL audiences.
+ * AuthCallback — handles the Google OAuth redirect for ALL audiences.
  *
- * URL shape: `/auth/callback?aud=customer#session_id=<id>`
- *
- * REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS,
- * THIS BREAKS THE AUTH.
+ * URL shape: `/auth/callback#id_token=<jwt>&state=<audience>.<random>`
+ * (see components/GoogleLoginButton.js).
  */
 export default function AuthCallback() {
   const location = useLocation();
@@ -25,16 +27,30 @@ export default function AuthCallback() {
     if (processed.current) return;
     processed.current = true;
 
-    const params = new URLSearchParams(location.search);
-    const audience = (params.get('aud') || 'customer').toLowerCase();
+    // Google returns id_token + state in the URL fragment.
+    const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+    const idToken = hashParams.get('id_token');
+    const returnedState = hashParams.get('state') || '';
+    const expectedState = sessionStorage.getItem(GOOGLE_OAUTH_STATE_KEY);
+    const nonce = sessionStorage.getItem(GOOGLE_OAUTH_NONCE_KEY);
+    sessionStorage.removeItem(GOOGLE_OAUTH_STATE_KEY);
+    sessionStorage.removeItem(GOOGLE_OAUTH_NONCE_KEY);
+    // Clear the token from the address bar / history.
+    window.history.replaceState(null, '', window.location.pathname);
 
-    // session_id arrives in the URL fragment per the Emergent playbook
-    const hash = window.location.hash || '';
-    const sessionIdMatch = hash.match(/session_id=([^&]+)/);
-    const sessionId = sessionIdMatch ? decodeURIComponent(sessionIdMatch[1]) : null;
+    const audience = (
+      returnedState.split('.')[0]
+      || new URLSearchParams(location.search).get('aud')
+      || 'customer'
+    ).toLowerCase();
+    const stateOk = !!expectedState && returnedState === expectedState;
 
-    if (!sessionId) {
-      setStatus('No session_id received from Google. Redirecting back to login…');
+    if (!idToken || !stateOk || !nonce) {
+      setStatus(
+        hashParams.get('error')
+          ? 'Google sign-in was cancelled. Redirecting back to login…'
+          : 'Google sign-in could not be verified. Redirecting back to login…',
+      );
       const back = {
         customer: '/login',
         salon: '/salon/login',
@@ -48,7 +64,8 @@ export default function AuthCallback() {
     (async () => {
       try {
         const res = await axios.post(`${API}/auth/google`, {
-          session_id: sessionId,
+          id_token: idToken,
+          nonce,
           audience,
         });
         const data = res.data || {};

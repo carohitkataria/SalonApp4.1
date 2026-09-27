@@ -1,0 +1,11 @@
+**/node_modules
+**/.git
+.emergent
+frontend/build
+backend
+test_reports
+tests
+memory
+*.md
+*.txt
+*.py

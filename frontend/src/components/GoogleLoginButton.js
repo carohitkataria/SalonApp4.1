@@ -1,20 +1,32 @@
 import React from 'react';
 import { Button } from '@/components/ui/button';
 
+const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+
+// Keys shared with pages/AuthCallback.js for the state/nonce round-trip.
+export const GOOGLE_OAUTH_STATE_KEY = 'google_oauth_state';
+export const GOOGLE_OAUTH_NONCE_KEY = 'google_oauth_nonce';
+
+const randomToken = () => {
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+};
+
 /**
- * Emergent-managed Google OAuth login button.
- *
- * REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS,
- * THIS BREAKS THE AUTH.
+ * Google OAuth login button (Google Identity / OpenID Connect).
  *
  * Usage:
  *   <GoogleLoginButton audience="customer" />
  *
  * Audience must be one of: 'customer' | 'salon' | 'platform' | 'supplier'.
- * After the user signs in with Google, Emergent redirects back to
- *   `${window.location.origin}/auth/callback?aud=${audience}`
- * with `#session_id=...` appended. The AuthCallback page then exchanges that
- * session_id for a JWT via POST `/api/auth/google`.
+ * Redirects to Google's OAuth endpoint; Google sends the user back to
+ *   `${window.location.origin}/auth/callback#id_token=...&state=...`
+ * The audience travels inside `state`. The AuthCallback page checks the state,
+ * then exchanges the id_token for a JWT via POST `/api/auth/google`.
+ *
+ * `${window.location.origin}/auth/callback` must be listed as an Authorised
+ * redirect URI on the OAuth client in Google Cloud Console.
  */
 export default function GoogleLoginButton({
   audience,
@@ -22,10 +34,25 @@ export default function GoogleLoginButton({
   className = '',
 }) {
   const handleClick = () => {
-    // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS,
-    // THIS BREAKS THE AUTH.
-    const redirectUrl = `${window.location.origin}/auth/callback?aud=${audience}`;
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+    if (!GOOGLE_CLIENT_ID) {
+      // eslint-disable-next-line no-console
+      console.error('REACT_APP_GOOGLE_CLIENT_ID is not set');
+      return;
+    }
+    const state = `${audience}.${randomToken()}`;
+    const nonce = randomToken();
+    sessionStorage.setItem(GOOGLE_OAUTH_STATE_KEY, state);
+    sessionStorage.setItem(GOOGLE_OAUTH_NONCE_KEY, nonce);
+    const params = new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      redirect_uri: `${window.location.origin}/auth/callback`,
+      response_type: 'id_token',
+      scope: 'openid email profile',
+      prompt: 'select_account',
+      state,
+      nonce,
+    });
+    window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
   };
 
   return (
