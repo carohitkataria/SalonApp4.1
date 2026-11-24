@@ -1,0 +1,10 @@
+# Shifain (Next.js), served next to SalonHub. SHIFAIN_DOMAIN comes from the .env
+# next to docker-compose.yml.
+{$SHIFAIN_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy shifain:3000
+}
+
+www.{$SHIFAIN_DOMAIN} {
+	redir https://{$SHIFAIN_DOMAIN}{uri} permanent
+}

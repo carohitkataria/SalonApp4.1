@@ -1,0 +1,28 @@
+# Adds Shifain to the same server. Turned on by this line in the .env next to
+# docker-compose.yml (then plain `docker compose ...` uses both files):
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.shifain.yml
+# Shifain's code is cloned next to this repo, at ../shifain, with its .env there.
+services:
+  shifain:
+    build: ../shifain
+    env_file: ../shifain/.env
+    restart: unless-stopped
+    expose:
+      - "3000"
+    volumes:
+      # Enquiries are appended here only if MongoDB cannot be reached.
+      - shifain_data:/app/.data
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  web:
+    environment:
+      SHIFAIN_DOMAIN: ${SHIFAIN_DOMAIN:?Set SHIFAIN_DOMAIN in the .env file next to docker-compose.yml}
+    volumes:
+      - ./deploy/sites/shifain.caddy:/etc/caddy/sites/shifain.caddy:ro
+    depends_on:
+      - shifain
+
+volumes:
+  shifain_data:
